@@ -193,13 +193,13 @@ Disable discovery on the coordinator with `-discovery=false`.
 │   └── discovery/
 │       └── udp.go            # UDP broadcast auto-discovery
 ├── go.mod
-├── micro-compute-daemon-spec-en.md
+├── SPEC.md
 └── README.md
 ```
 
 ## Out of Scope
 
-Per the [spec](micro-compute-daemon-spec-en.md), the following are deliberately excluded:
+Per the [spec](SPEC.md), the following are deliberately excluded:
 
 - Blockchain / cryptocurrency / token economy
 - Zero-Knowledge Proofs / verifiable computation
