@@ -102,10 +102,12 @@ Smart task distribution based on worker load (prioritizing the least busy machin
 
 These decisions were made deliberately to keep the project's complexity manageable:
 
-- **Blockchain / cryptocurrency / token economy:** Since the system operates among trusted, known machines, there is no need for a payment or trust mechanism.
-- **Zero-Knowledge Proofs / verifiable computation:** For the same reason, there is no need to cryptographically prove that a computation was actually performed correctly.
+- **Blockchain / cryptocurrency / token economy:** The system operates among trusted machines, so there is no need for a payment mechanism.
+- **Zero-Knowledge Proofs / verifiable computation:** There is no need to cryptographically prove that a computation was performed correctly.
 - **Splitting model layers across the network (pipeline parallelism):** Deliberately excluded due to the bandwidth bottleneck explained above.
-- **Building a distributed network over the public internet with unknown machines:** The system is designed only for trusted machines on a local network; this is not a "public compute marketplace."
+- **Building a distributed network over the public internet with unknown machines:** The system is designed for trusted machines on a local network; this is not a "public compute marketplace."
+
+*(Note: As of v2, the system includes fundamental LAN security—Shared Token Auth, TLS Encryption with TOFU Pinning, Replay Attack Protection, Rate Limiting, and Audit Logging—to defend against local network threats like ARP spoofing or rogue nodes. However, it still stops short of public-internet zero-trust architecture.)*
 
 ## 10. Expected Outcome
 

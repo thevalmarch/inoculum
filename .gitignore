@@ -12,3 +12,9 @@ bin/
 # Environment variables
 .env
 .env.local
+
+# Inoculum v2 artifacts
+.inoculum-*-cert.pem
+.inoculum-*-key.pem
+.inoculum-*-known-hosts
+inoculum-audit.log

@@ -43,31 +43,38 @@ go build -o bin/benchmark  ./cmd/benchmark
 
 **Terminal 1 — Start the coordinator:**
 ```bash
-./bin/coordinator -port 8080
+./bin/coordinator -port 8080 -token my-secret-token
 ```
+*(Note the certificate fingerprint printed in the coordinator logs)*
 
 **Terminal 2 — Start a worker:**
 ```bash
-./bin/worker -port 9000 -coordinator localhost:8080
+./bin/worker -port 9000 -coordinator localhost:8080 -token my-secret-token -coordinator-fingerprint <FINGERPRINT_FROM_COORD_LOGS>
 ```
 
 **Terminal 3 — (Optional) Start a second worker:**
 ```bash
-./bin/worker -port 9001 -coordinator localhost:8080
+./bin/worker -port 9001 -coordinator localhost:8080 -token my-secret-token -coordinator-fingerprint <FINGERPRINT_FROM_COORD_LOGS>
 ```
 
 > **Note on Concurrency:** The `-concurrency` flag on the worker limits how many tasks a single worker can process at once (default is `1`). This is important for getting realistic multi-worker speedup numbers during benchmarking, as it forces the coordinator to distribute work across actual workers rather than a single worker multiplexing everything concurrently via goroutines.
 
 **Terminal 4 — Submit a test job:**
 ```bash
-curl -X POST localhost:8080/submit-job \
+curl -X POST -k https://localhost:8080/submit-job \
   -H "Content-Type: application/json" \
+  -H "X-Inoculum-Token: my-secret-token" \
+  -H "X-Inoculum-Nonce: 12345" \
+  -H "X-Inoculum-Timestamp: $(date +%s)" \
   -d '{"task_type": "dummy", "inputs": ["hello"]}'
 ```
 
 **Check system status:**
 ```bash
-curl -s http://localhost:8080/status | jq .
+curl -s -k https://localhost:8080/status \
+  -H "X-Inoculum-Token: my-secret-token" \
+  -H "X-Inoculum-Nonce: 123456" \
+  -H "X-Inoculum-Timestamp: $(date +%s)" | jq .
 ```
 
 ### Run on Two Machines on the Same LAN
@@ -75,19 +82,19 @@ curl -s http://localhost:8080/status | jq .
 **Machine A (Coordinator + Worker):**
 ```bash
 # Start the coordinator (with auto-discovery enabled by default)
-./bin/coordinator -port 8080
+./bin/coordinator -port 8080 -token my-secret-token
 
 # Optionally also run a worker on this machine
-./bin/worker -port 9000 -coordinator localhost:8080
+./bin/worker -port 9000 -coordinator localhost:8080 -token my-secret-token -coordinator-fingerprint <FINGERPRINT>
 ```
 
 **Machine B (Worker):**
 ```bash
 # Option 1: Auto-discovery (coordinator is found automatically via UDP broadcast)
-./bin/worker -port 9000
+./bin/worker -port 9000 -token my-secret-token -coordinator-fingerprint <FINGERPRINT>
 
 # Option 2: Manual address
-./bin/worker -port 9000 -coordinator 192.168.1.10:8080
+./bin/worker -port 9000 -coordinator 192.168.1.10:8080 -token my-secret-token -coordinator-fingerprint <FINGERPRINT>
 ```
 
 The worker on Machine B will automatically discover the coordinator via UDP broadcast on port 9999. If your network blocks UDP broadcasts, use the `-coordinator` flag with the coordinator's IP address.
@@ -120,8 +127,11 @@ The worker on Machine B will automatically discover the coordinator via UDP broa
 ### Example: File Analysis Tasks
 
 ```bash
-curl -s -X POST http://localhost:8080/submit-job \
+curl -s -k -X POST https://localhost:8080/submit-job \
   -H "Content-Type: application/json" \
+  -H "X-Inoculum-Token: my-secret-token" \
+  -H "X-Inoculum-Nonce: 987654" \
+  -H "X-Inoculum-Timestamp: $(date +%s)" \
   -d '{
     "task_type": "file_analyze",
     "inputs": [
@@ -137,10 +147,10 @@ Compare distributed vs sequential execution:
 
 ```bash
 # With dummy tasks (10 tasks)
-./bin/benchmark -coordinator localhost:8080 -tasks 10 -type dummy
+./bin/benchmark -coordinator localhost:8080 -tasks 10 -type dummy -token my-secret-token -coordinator-fingerprint <FINGERPRINT>
 
 # With file analysis tasks
-./bin/benchmark -coordinator localhost:8080 -tasks 8 -type file_analyze -input /etc/os-release
+./bin/benchmark -coordinator localhost:8080 -tasks 8 -type file_analyze -input /etc/os-release -token my-secret-token -coordinator-fingerprint <FINGERPRINT>
 ```
 
 The benchmark reports:

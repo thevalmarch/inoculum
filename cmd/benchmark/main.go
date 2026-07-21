@@ -22,8 +22,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
+	"github.com/inoculum/internal/auth"
+	"github.com/inoculum/internal/crypto"
 	"github.com/inoculum/internal/types"
 	"github.com/inoculum/internal/worker"
 )
@@ -33,7 +36,17 @@ func main() {
 	numTasks := flag.Int("tasks", 10, "Number of tasks to submit")
 	taskType := flag.String("type", "dummy", "Task type to benchmark")
 	input := flag.String("input", "benchmark-payload", "Input for each task")
+	tokenFlag := flag.String("token", "", "Shared secret token for authentication")
+	fingerprintFlag := flag.String("coordinator-fingerprint", "", "Optional: Pinned SHA-256 fingerprint of the coordinator's certificate")
 	flag.Parse()
+
+	token := *tokenFlag
+	if token == "" {
+		token = os.Getenv("INOCULUM_TOKEN")
+	}
+	if token == "" {
+		log.Fatalf("Fatal: -token flag or INOCULUM_TOKEN env var is required")
+	}
 
 	fmt.Println("╔══════════════════════════════════════════════════════════╗")
 	fmt.Println("║           Inoculum Benchmark — Phase 4                  ║")
@@ -49,7 +62,7 @@ func main() {
 	}
 
 	distStart := time.Now()
-	distResp, err := submitJob(*coordAddr, *taskType, inputs)
+	distResp, err := submitJob(*coordAddr, *taskType, inputs, token, *fingerprintFlag)
 	distDuration := time.Since(distStart)
 
 	if err != nil {
@@ -85,7 +98,7 @@ func main() {
 	// --- Sequential Execution ---
 	fmt.Printf("▶ Running %d tasks sequentially on local machine...\n\n", *numTasks)
 
-	executor := worker.NewExecutor()
+	executor := worker.NewExecutor([]string{"."})
 	seqStart := time.Now()
 	for i, inp := range inputs {
 		output, dur, err := executor.Execute(*taskType, inp)
@@ -125,7 +138,7 @@ func main() {
 }
 
 // submitJob sends a job to the coordinator and returns the response.
-func submitJob(coordAddr, taskType string, inputs []string) (*types.SubmitJobResponse, error) {
+func submitJob(coordAddr, taskType string, inputs []string, token, fingerprint string) (*types.SubmitJobResponse, error) {
 	req := types.SubmitJobRequest{
 		TaskType: taskType,
 		Inputs:   inputs,
@@ -136,11 +149,29 @@ func submitJob(coordAddr, taskType string, inputs []string) (*types.SubmitJobRes
 		return nil, fmt.Errorf("marshal error: %w", err)
 	}
 
-	resp, err := http.Post(
-		fmt.Sprintf("http://%s/submit-job", coordAddr),
-		"application/json",
-		bytes.NewReader(body),
-	)
+	tlsConfig := crypto.NewTOFUClientConfig(coordAddr, fingerprint, ".inoculum-client-known-hosts")
+	
+	// Clone DefaultTransport to preserve HTTP/2 multiplexing and connection reuse,
+	// avoiding massive TLS overhead on concurrent requests.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	transport.MaxIdleConnsPerHost = 100
+
+	client := &http.Client{
+		Timeout:   5 * time.Minute,
+		Transport: transport,
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://%s/submit-job", coordAddr), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Inoculum-Token", token)
+	httpReq.Header.Set("X-Inoculum-Nonce", auth.GenerateNonce())
+	httpReq.Header.Set("X-Inoculum-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP error: %w", err)
 	}

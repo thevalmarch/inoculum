@@ -21,7 +21,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/inoculum/internal/audit"
 	"github.com/inoculum/internal/coordinator"
+	"github.com/inoculum/internal/crypto"
 	"github.com/inoculum/internal/discovery"
 )
 
@@ -29,7 +31,28 @@ func main() {
 	port := flag.Int("port", 8080, "HTTP port for the coordinator")
 	strategy := flag.String("strategy", "round-robin", "Scheduling strategy: round-robin, least-busy")
 	enableDiscovery := flag.Bool("discovery", true, "Enable UDP broadcast discovery for workers")
+	tokenFlag := flag.String("token", "", "Shared secret token for authentication")
+	auditLog := flag.String("audit-log", "inoculum-audit.log", "Path to audit log file (JSON)")
 	flag.Parse()
+
+	token := *tokenFlag
+	if token == "" {
+		token = os.Getenv("INOCULUM_TOKEN")
+	}
+	if token == "" {
+		log.Fatalf("[coordinator] Fatal: -token flag or INOCULUM_TOKEN env var is required")
+	}
+
+	if err := audit.InitLogger(*auditLog); err != nil {
+		log.Fatalf("Failed to initialize audit logger: %v", err)
+	}
+	log.Printf("[coordinator] Audit logging to %s", *auditLog)
+
+	cert, fingerprint, err := crypto.GetOrGenerateCert(".inoculum-coordinator-cert.pem", ".inoculum-coordinator-key.pem")
+	if err != nil {
+		log.Fatalf("[coordinator] Fatal: failed to get or generate cert: %v", err)
+	}
+	log.Printf("[coordinator] Loaded TLS certificate. Fingerprint: %s", fingerprint)
 
 	// Determine scheduling strategy
 	var sched coordinator.ScheduleStrategy
@@ -60,7 +83,7 @@ func main() {
 	}()
 
 	// Start the coordinator server
-	server := coordinator.NewServer(*port, sched)
+	server := coordinator.NewServer(*port, sched, token, cert)
 	if err := server.Start(); err != nil {
 		log.Fatalf("[coordinator] Fatal: %v", err)
 	}

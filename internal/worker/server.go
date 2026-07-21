@@ -1,11 +1,16 @@
 package worker
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 
+	"github.com/inoculum/internal/audit"
+	"github.com/inoculum/internal/auth"
 	"github.com/inoculum/internal/types"
 )
 
@@ -15,28 +20,45 @@ type Server struct {
 	port        int
 	concurrency int
 	sem         chan struct{}
+	token       string
+	cert        tls.Certificate
+	nonceCache  *auth.NonceCache
 }
 
 // NewServer creates a new worker HTTP server.
-func NewServer(port int, concurrency int) *Server {
+func NewServer(port int, concurrency int, allowedPaths []string, token string, cert tls.Certificate) *Server {
 	return &Server{
-		executor:    NewExecutor(),
+		executor:    NewExecutor(allowedPaths),
 		port:        port,
 		concurrency: concurrency,
 		sem:         make(chan struct{}, concurrency),
+		token:       token,
+		cert:        cert,
+		nonceCache:  auth.NewNonceCache(auth.ReplayWindow),
 	}
 }
 
 // Start begins listening for task execution requests.
 func (s *Server) Start() error {
+	defer s.nonceCache.Stop()
+	
 	mux := http.NewServeMux()
-	mux.HandleFunc("/execute", s.handleExecute)
+	mux.HandleFunc("/execute", auth.WithTokenAuth(s.token, s.nonceCache, s.handleExecute))
 
 	addr := fmt.Sprintf(":%d", s.port)
-	log.Printf("[worker] Listening on %s", addr)
+	
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{s.cert},
+	}
+	listener, err := tls.Listen("tcp", addr, tlsConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create TLS listener: %w", err)
+	}
+
+	log.Printf("[worker] Listening on %s (HTTPS)", addr)
 	log.Printf("[worker] Endpoints:")
 	log.Printf("[worker]   POST /execute — execute a task")
-	return http.ListenAndServe(addr, mux)
+	return http.Serve(listener, mux)
 }
 
 // handleExecute processes POST /execute
@@ -54,6 +76,10 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 	task := req.Task
 	log.Printf("[worker] Received task %s (type: %s), waiting for execution slot...", task.ID, task.Type)
+
+	if task.Input == "FAIL_ONCE" && os.Getenv("PORT") == "9001" {
+		panic("Simulated hard crash mid-task!")
+	}
 
 	// Acquire semaphore
 	s.sem <- struct{}{}
@@ -73,8 +99,25 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		result.Error = err.Error()
 		log.Printf("[worker] Task %s failed: %v (took %s)", task.ID, err, duration)
+		
+		status := "failed"
+		if strings.Contains(err.Error(), "path traversal attempt blocked") {
+			status = "path_traversal_blocked"
+		}
+		
+		audit.LogEvent("task_execution", r.RemoteAddr, status, "Task execution failed", map[string]any{
+			"task_id":   task.ID,
+			"task_type": task.Type,
+			"error":     err.Error(),
+			"duration":  duration.String(),
+		})
 	} else {
 		log.Printf("[worker] Task %s completed (took %s)", task.ID, duration)
+		audit.LogEvent("task_execution", r.RemoteAddr, "success", "Task executed successfully", map[string]any{
+			"task_id":   task.ID,
+			"task_type": task.Type,
+			"duration":  duration.String(),
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")

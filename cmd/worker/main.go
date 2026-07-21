@@ -20,8 +20,11 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/inoculum/internal/audit"
+	"github.com/inoculum/internal/crypto"
 	"github.com/inoculum/internal/discovery"
 	"github.com/inoculum/internal/worker"
 )
@@ -31,7 +34,32 @@ func main() {
 	coordAddr := flag.String("coordinator", "", "Coordinator address (host:port). Leave empty for auto-discovery.")
 	workerID := flag.String("id", "", "Worker ID (default: auto-generated)")
 	concurrency := flag.Int("concurrency", 1, "Max concurrent tasks (default: 1)")
+	allowedPathsStr := flag.String("allowed-paths", ".", "Comma-separated list of directories allowed for file_analyze")
+	tokenFlag := flag.String("token", "", "Shared secret token for authentication")
+	fingerprintFlag := flag.String("coordinator-fingerprint", "", "Optional: Pinned SHA-256 fingerprint of the coordinator's certificate")
+	auditLog := flag.String("audit-log", "inoculum-audit.log", "Path to audit log file (JSON)")
 	flag.Parse()
+
+	token := *tokenFlag
+	if token == "" {
+		token = os.Getenv("INOCULUM_TOKEN")
+	}
+	if token == "" {
+		log.Fatalf("[worker] Fatal: -token flag or INOCULUM_TOKEN env var is required")
+	}
+
+	if err := audit.InitLogger(*auditLog); err != nil {
+		log.Fatalf("Failed to initialize audit logger: %v", err)
+	}
+	log.Printf("[worker] Audit logging to %s", *auditLog)
+
+	certFile := fmt.Sprintf(".inoculum-worker-%d-cert.pem", *port)
+	keyFile := fmt.Sprintf(".inoculum-worker-%d-key.pem", *port)
+	cert, fingerprint, err := crypto.GetOrGenerateCert(certFile, keyFile)
+	if err != nil {
+		log.Fatalf("[worker] Fatal: failed to get or generate cert: %v", err)
+	}
+	log.Printf("[worker] Loaded TLS certificate. Fingerprint: %s", fingerprint)
 
 	// Generate worker ID if not provided
 	if *workerID == "" {
@@ -54,7 +82,7 @@ func main() {
 	workerAddr := fmt.Sprintf("%s:%d", getLocalIP(), *port)
 
 	// Register with the coordinator
-	reg := worker.NewRegistration(*workerID, workerAddr, *coordAddr)
+	reg := worker.NewRegistration(*workerID, workerAddr, *coordAddr, token, *fingerprintFlag)
 	if err := reg.Register(); err != nil {
 		log.Fatalf("[worker] Registration failed: %v", err)
 	}
@@ -74,8 +102,16 @@ func main() {
 		os.Exit(0)
 	}()
 
+	// Parse allowed paths
+	var allowedPaths []string
+	if *allowedPathsStr != "" {
+		for _, p := range strings.Split(*allowedPathsStr, ",") {
+			allowedPaths = append(allowedPaths, strings.TrimSpace(p))
+		}
+	}
+
 	// Start the worker HTTP server
-	srv := worker.NewServer(*port, *concurrency)
+	srv := worker.NewServer(*port, *concurrency, allowedPaths, token, cert)
 	if err := srv.Start(); err != nil {
 		log.Fatalf("[worker] Fatal: %v", err)
 	}

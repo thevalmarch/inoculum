@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/inoculum/internal/auth"
+	"github.com/inoculum/internal/crypto"
 	"github.com/inoculum/internal/types"
 )
 
@@ -24,16 +26,32 @@ type Registration struct {
 	workerAddress    string
 	coordinatorAddr  string
 	hostname         string
+	token            string
+	client           *http.Client
 }
 
 // NewRegistration creates a registration manager.
-func NewRegistration(workerID, workerAddress, coordinatorAddr string) *Registration {
+func NewRegistration(workerID, workerAddress, coordinatorAddr, token, coordFingerprint string) *Registration {
 	hostname, _ := os.Hostname()
+	
+	tlsConfig := crypto.NewTOFUClientConfig(coordinatorAddr, coordFingerprint, ".inoculum-worker-known-hosts")
+	
+	// Clone DefaultTransport to preserve connection pooling and avoid TLS overhead.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
 	return &Registration{
 		workerID:        workerID,
 		workerAddress:   workerAddress,
 		coordinatorAddr: coordinatorAddr,
 		hostname:        hostname,
+		token:           token,
+		client:          client,
 	}
 }
 
@@ -55,11 +73,16 @@ func (reg *Registration) Register() error {
 		return fmt.Errorf("marshal error: %w", err)
 	}
 
-	resp, err := http.Post(
-		fmt.Sprintf("http://%s/register", reg.coordinatorAddr),
-		"application/json",
-		bytes.NewReader(body),
-	)
+	reqHttp, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://%s/register", reg.coordinatorAddr), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	reqHttp.Header.Set("Content-Type", "application/json")
+	reqHttp.Header.Set("X-Inoculum-Token", reg.token)
+	reqHttp.Header.Set("X-Inoculum-Nonce", auth.GenerateNonce())
+	reqHttp.Header.Set("X-Inoculum-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+
+	resp, err := reg.client.Do(reqHttp)
 	if err != nil {
 		return fmt.Errorf("registration failed: %w", err)
 	}
@@ -104,11 +127,17 @@ func (reg *Registration) sendHeartbeat() {
 		return
 	}
 
-	resp, err := http.Post(
-		fmt.Sprintf("http://%s/heartbeat", reg.coordinatorAddr),
-		"application/json",
-		bytes.NewReader(body),
-	)
+	reqHttp, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://%s/heartbeat", reg.coordinatorAddr), bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[worker] Heartbeat request creation failed: %v", err)
+		return
+	}
+	reqHttp.Header.Set("Content-Type", "application/json")
+	reqHttp.Header.Set("X-Inoculum-Token", reg.token)
+	reqHttp.Header.Set("X-Inoculum-Nonce", auth.GenerateNonce())
+	reqHttp.Header.Set("X-Inoculum-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+
+	resp, err := reg.client.Do(reqHttp)
 	if err != nil {
 		log.Printf("[worker] Heartbeat failed: %v", err)
 		return

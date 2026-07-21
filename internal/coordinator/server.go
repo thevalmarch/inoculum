@@ -2,13 +2,18 @@ package coordinator
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/inoculum/internal/audit"
+	"github.com/inoculum/internal/auth"
+	"github.com/inoculum/internal/crypto"
 	"github.com/inoculum/internal/types"
 )
 
@@ -18,6 +23,12 @@ type Server struct {
 	scheduler *Scheduler
 	startTime time.Time
 	port      int
+	token         string
+	cert          tls.Certificate
+	nonceCache    *auth.NonceCache
+	rateLimiter   *RateLimiter
+	workerClients map[string]*http.Client
+	wcMu          sync.Mutex
 
 	// Job tracking
 	mu   sync.RWMutex
@@ -34,14 +45,19 @@ type Server struct {
 }
 
 // NewServer creates a new coordinator server.
-func NewServer(port int, strategy ScheduleStrategy) *Server {
+func NewServer(port int, strategy ScheduleStrategy, token string, cert tls.Certificate) *Server {
 	return &Server{
-		registry:   NewRegistry(),
-		scheduler:  NewScheduler(strategy),
-		startTime:  time.Now(),
-		port:       port,
-		jobs:       make(map[string]*types.Job),
-		maxRetries: 2,
+		registry:      NewRegistry(),
+		scheduler:     NewScheduler(strategy),
+		startTime:     time.Now(),
+		port:          port,
+		token:         token,
+		cert:          cert,
+		nonceCache:    auth.NewNonceCache(auth.ReplayWindow),
+		rateLimiter:   NewRateLimiter(1.0, 60.0), // 1 job/sec, burst of 60
+		workerClients: make(map[string]*http.Client),
+		jobs:          make(map[string]*types.Job),
+		maxRetries:    2,
 	}
 }
 
@@ -49,21 +65,31 @@ func NewServer(port int, strategy ScheduleStrategy) *Server {
 func (s *Server) Start() error {
 	stop := make(chan struct{})
 	s.registry.StartCleanup(stop)
+	defer s.nonceCache.Stop()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/register", s.handleRegister)
-	mux.HandleFunc("/heartbeat", s.handleHeartbeat)
-	mux.HandleFunc("/submit-job", s.handleSubmitJob)
-	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/register", auth.WithTokenAuth(s.token, s.nonceCache, s.handleRegister))
+	mux.HandleFunc("/heartbeat", auth.WithTokenAuth(s.token, s.nonceCache, s.handleHeartbeat))
+	mux.HandleFunc("/submit-job", auth.WithTokenAuth(s.token, s.nonceCache, s.handleSubmitJob))
+	mux.HandleFunc("/status", auth.WithTokenAuth(s.token, s.nonceCache, s.handleStatus))
 
 	addr := fmt.Sprintf(":%d", s.port)
-	log.Printf("[coordinator] Starting on %s", addr)
+	
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{s.cert},
+	}
+	listener, err := tls.Listen("tcp", addr, tlsConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create TLS listener: %w", err)
+	}
+
+	log.Printf("[coordinator] Starting HTTPS on %s", addr)
 	log.Printf("[coordinator] Endpoints:")
 	log.Printf("[coordinator]   POST /register    — worker registration")
 	log.Printf("[coordinator]   POST /heartbeat   — worker alive signal")
 	log.Printf("[coordinator]   POST /submit-job  — submit a new job")
 	log.Printf("[coordinator]   GET  /status      — system status")
-	return http.ListenAndServe(addr, mux)
+	return http.Serve(listener, mux)
 }
 
 // SetSchedulerStrategy updates the scheduling strategy.
@@ -85,6 +111,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.registry.Register(req)
+	audit.LogEvent("worker_registration", r.RemoteAddr, "success", "Worker registered", map[string]any{"worker_id": req.ID})
 	writeJSON(w, types.RegisterResponse{
 		OK:      true,
 		Message: fmt.Sprintf("Worker %s registered successfully", req.ID),
@@ -112,6 +139,17 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+	}
+
+	if !s.rateLimiter.Allow(ip) {
+		audit.LogEvent("job_submission", ip, "429", "Rate limit exceeded", map[string]any{"path": r.URL.Path})
+		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		return
 	}
 
@@ -187,6 +225,13 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	for _, rt := range roundTrips {
 		log.Printf("[coordinator]   Task %s → Worker %s: round-trip %s", rt.TaskID, rt.WorkerID, rt.LatencyS)
 	}
+
+	audit.LogEvent("job_submission", r.RemoteAddr, "success", "Job completed", map[string]any{
+		"job_id":     jobID,
+		"tasks":      len(tasks),
+		"task_type":  req.TaskType,
+		"duration_s": totalDuration.String(),
+	})
 
 	writeJSON(w, resp)
 }
@@ -294,12 +339,36 @@ func (s *Server) sendTaskToWorker(worker *types.WorkerInfo, task types.Task) (ty
 		return types.Result{}, fmt.Errorf("marshal error: %w", err)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Post(
-		fmt.Sprintf("http://%s/execute", worker.Address),
-		"application/json",
-		bytes.NewReader(reqBody),
-	)
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://%s/execute", worker.Address), bytes.NewReader(reqBody))
+	if err != nil {
+		return types.Result{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Inoculum-Token", s.token)
+	req.Header.Set("X-Inoculum-Nonce", auth.GenerateNonce())
+	req.Header.Set("X-Inoculum-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+
+	s.wcMu.Lock()
+	client, ok := s.workerClients[worker.Address]
+	if !ok {
+		tlsConfig := crypto.NewTOFUClientConfig(worker.Address, "", ".inoculum-coordinator-known-hosts")
+		
+		// Clone DefaultTransport to preserve connection pooling and HTTP/2 multiplexing,
+		// otherwise a raw &http.Transport{} defaults to no connection reuse (MaxIdleConns=2) 
+		// and forces expensive TLS handshakes on every concurrent task dispatch.
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = tlsConfig
+		transport.MaxIdleConnsPerHost = 100 // High concurrency per worker
+
+		client = &http.Client{
+			Timeout:   5 * time.Minute,
+			Transport: transport,
+		}
+		s.workerClients[worker.Address] = client
+	}
+	s.wcMu.Unlock()
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return types.Result{}, fmt.Errorf("HTTP error: %w", err)
 	}
