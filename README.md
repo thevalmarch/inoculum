@@ -99,6 +99,22 @@ curl -s -k https://localhost:8080/status \
 
 The worker on Machine B will automatically discover the coordinator via UDP broadcast on port 9999. If your network blocks UDP broadcasts, use the `-coordinator` flag with the coordinator's IP address.
 
+## Security (v2)
+
+All communication is secured against LAN-level threats (ARP spoofing, rogue nodes, traffic interception):
+
+| Layer | Mechanism | Description |
+|-------|-----------|-------------|
+| **Authentication** | `-token` flag | Shared-secret token verified on every request via `X-Inoculum-Token` header |
+| **Encryption** | Auto-generated TLS | Self-signed certificates generated on first run and persisted to disk |
+| **Identity Pinning** | TOFU (Trust On First Use) | Coordinator pins each worker's certificate fingerprint; workers pin coordinator via `-coordinator-fingerprint` flag |
+| **Path Traversal** | `-allowed-paths` flag | Workers restrict `file_analyze` to explicitly allowed directories |
+| **Replay Protection** | Nonce + Timestamp | Every request carries a unique `X-Inoculum-Nonce` and `X-Inoculum-Timestamp`; duplicates are rejected within a 30s window |
+| **Rate Limiting** | Token bucket per IP | `/submit-job` is limited to 60 burst / 1 per second per source IP; returns `429` when exceeded |
+| **Audit Logging** | Structured JSON | All events (registrations, jobs, auth failures, path traversals) are logged to `inoculum-audit.log` |
+
+> **Note:** Certificates and keys are auto-generated on first startup and stored as `.inoculum-*-cert.pem` / `.inoculum-*-key.pem`. These are excluded from version control via `.gitignore`.
+
 ## API Endpoints
 
 ### Coordinator
@@ -189,21 +205,30 @@ Disable discovery on the coordinator with `-discovery=false`.
 ├── cmd/
 │   ├── coordinator/main.go   # Coordinator entry point
 │   ├── worker/main.go        # Worker entry point
-│   └── benchmark/main.go     # Benchmark tool (Phase 4)
+│   └── benchmark/main.go     # Benchmark tool
 ├── internal/
 │   ├── types/types.go        # Shared data structures
+│   ├── audit/logger.go       # Structured JSON audit logger (log/slog)
+│   ├── auth/
+│   │   ├── auth.go           # Token auth middleware + nonce validation
+│   │   └── replay.go         # NonceCache for replay attack protection
 │   ├── coordinator/
-│   │   ├── server.go         # HTTP server & endpoint handlers
+│   │   ├── server.go         # HTTPS server & endpoint handlers
 │   │   ├── scheduler.go      # Round-robin & least-busy scheduling
-│   │   └── registry.go       # Worker registry & heartbeat tracking
+│   │   ├── registry.go       # Worker registry & heartbeat tracking
+│   │   └── ratelimit.go      # Token bucket rate limiter per IP
+│   ├── crypto/
+│   │   └── tls.go            # TLS cert generation & TOFU pinning
 │   ├── worker/
-│   │   ├── server.go         # Worker HTTP server (/execute)
+│   │   ├── server.go         # Worker HTTPS server (/execute)
 │   │   ├── executor.go       # Task executors (dummy, file, HTTP)
+│   │   ├── executor_test.go  # Path traversal protection tests
 │   │   └── registration.go   # Register & heartbeat with coordinator
 │   └── discovery/
 │       └── udp.go            # UDP broadcast auto-discovery
 ├── go.mod
-├── SPEC.md
+├── SPEC.md                   # Full project specification
+├── LICENSE                   # MIT License
 └── README.md
 ```
 
@@ -215,3 +240,7 @@ Per the [spec](SPEC.md), the following are deliberately excluded:
 - Zero-Knowledge Proofs / verifiable computation
 - Pipeline parallelism (splitting model layers across network)
 - Public internet / untrusted machine networks
+
+## License
+
+MIT — see [LICENSE](LICENSE).

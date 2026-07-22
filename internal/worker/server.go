@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/inoculum/internal/audit"
@@ -76,10 +75,6 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 	task := req.Task
 	log.Printf("[worker] Received task %s (type: %s), waiting for execution slot...", task.ID, task.Type)
-
-	if task.Input == "FAIL_ONCE" && os.Getenv("PORT") == "9001" {
-		panic("Simulated hard crash mid-task!")
-	}
 
 	// Acquire semaphore
 	s.sem <- struct{}{}
