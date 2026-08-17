@@ -1,114 +1,220 @@
-# Project Specification: Inoculum — LAN-Based Task-Parallel Distributed Compute Daemon
+# Inoculum V1 Technical Specification
 
-## 1. Project Purpose
+This document describes the current V1 runtime. User setup and examples live in
+[README.md](README.md).
 
-**Inoculum** is a lightweight, minimal-dependency background service (daemon) that makes the processing power (CPU/GPU) of multiple computers connected to the same local network (LAN) — for example a Linux machine and a Mac — manageable from a single central control point.
+## Product boundary
 
-The goal is **not** to split a large AI model into pieces and shuttle them across the network (pipeline parallelism). Instead, the system distributes **independent tasks** across different machines, and each machine executes its own task completely independently (task/data parallelism). Example scenario: one machine analyzes the database schema of a codebase while another machine simultaneously generates documentation for that same codebase. The two jobs are not dependent on each other, so there is no need for high-volume, low-latency data transfer between them.
+Inoculum turns 2–10 user-owned computers on a trusted LAN into a small execution
+pool for independent, finite tasks.
 
-## 2. Why Task/Data Parallelism Instead of Pipeline Parallelism?
+V1 is deliberately not a workflow engine, cluster orchestrator, remote shell,
+distributed filesystem, container runtime, or public compute service.
 
-This decision is the most critical architectural choice in the project, and it stems from a hard technical constraint.
+## Runtime architecture
 
-**What pipeline parallelism is, and why it was rejected:**
-It is possible to split an AI model's layers across different machines and "run" the model together by passing intermediate results (particularly the KV-cache data produced by the attention mechanism) from one machine to the next. However, this approach runs into the following physical limitation:
+```text
+submit client ---> coordinator <--- outbound pull workers
+                       |
+                       v
+                 FIFO task queue
+                       |
+                       v
+                 lease state model
+```
 
-- Within a single GPU/CPU's own memory (VRAM/RAM), data flows at hundreds of gigabytes per second.
-- A standard home LAN connection (WiFi or 1 Gbps Ethernet) offers roughly 100-125 megabytes per second.
-- This gap creates a bottleneck of up to 1000x. Since this intermediate data would need to cross the network for every single token the model generates, the system becomes tens to hundreds of times slower than running on a single machine.
+The coordinator is the only Inoculum process that listens on the network. It
+owns all in-memory job, task, queue, and lease state. Workers make outbound HTTPS
+requests to claim work, renew leases, and submit results.
 
-For this reason, pipeline parallelism is not practically usable on low-bandwidth networks like home/office LANs.
+There is one coordinator address, one coordinator port, one FIFO queue, and one
+global lease/retry policy. Worker concurrency is local to each worker; the
+coordinator does not maintain load counters or select scheduler strategies.
 
-**Why task/data parallelism works:**
-In this approach, only the following is transferred between machines: the task definition (a few KB of text/JSON) and the final result (again small text/JSON). There is no continuous, synchronous, high-volume data flow between machines. This eliminates the network bottleneck, and the system can realistically achieve measurable speedup.
+## Task lifecycle
 
-## 3. System Architecture
+A task has a coordinator-generated stable ID and one of four states:
 
-The system consists of two main components:
+- `queued`
+- `leased`
+- `completed`
+- `failed`
 
-### 3.1 Coordinator
-- Maintains the list of all workers (worker nodes) on the network.
-- Breaks incoming jobs down into smaller tasks.
-- Assigns tasks to appropriate workers (simple round-robin, or "assign to the least busy worker" logic).
-- Collects and merges results returned by workers.
-- Can run on any machine; it can be one of the nodes on the network or a separate dedicated machine.
+Claiming a queued task creates a unique lease containing the task ID, worker ID,
+issue time, expiry time, and attempt number. A worker renews the lease while its
+executor is running.
 
-### 3.2 Worker (Worker Node)
-- One instance runs on each participating machine.
-- On startup, it registers itself with the coordinator: machine name, available resources (CPU core count, free RAM, GPU info if any).
-- Receives tasks from the coordinator, processes them locally (e.g. a local LLM call, running a script, an analysis function).
-- Sends the result back to the coordinator once the task is complete.
-- Periodically sends a "heartbeat" (alive signal); the coordinator removes a worker from the list if its heartbeat stops.
+If a lease expires, the task is returned to the FIFO queue unless its configured
+attempt limit is exhausted. Late or stale results are rejected. A completed task
+is never duplicated in coordinator result state.
 
-### 3.3 Node Discovery
-To eliminate the need for manually entering IP addresses, an mDNS (multicast DNS) mechanism or a simple UDP broadcast is used. When a new worker joins the network, it automatically finds the coordinator and registers itself.
+Delivery is at least once. A task can execute more than once when a worker
+finishes but cannot deliver its result before lease expiry.
 
-## 4. Communication Protocol
+Coordinator defaults:
 
-- Transport layer: starts with HTTP/JSON (for simplicity and ease of debugging). Can later move to gRPC + Protocol Buffers if performance requires it.
-- The coordinator exposes the following endpoints:
-  - `POST /register` — a worker introducing itself
-  - `POST /heartbeat` — a worker reporting that it is alive
-  - `POST /submit-job` — submitting a new job from outside (from the user)
-  - `GET /status` — overall system status: how many workers are active, how many tasks are queued
-- The worker exposes the following endpoint:
-  - `POST /execute` — request to execute a task sent by the coordinator
+- lease duration: 6 seconds
+- maximum attempts: 3
 
-## 5. Data Structures (Conceptual)
+Both values are global V1 coordinator settings exposed as `--lease-duration`
+and `--max-attempts`.
 
-**Job:** The high-level request given to the system by the user. Can be broken down into multiple Tasks.
+## Submission models
 
-**Task:** The smallest unit of work a single worker can perform independently. Contains: unique ID, task type, input data, status (pending/processing/completed/failed).
+### Manifest mode
 
-**WorkerInfo:** The worker's identity, network address, timestamp of the last heartbeat, whether it is currently busy.
+The primary real-workload input is a versioned JSON manifest:
 
-**Result:** Task ID, produced output, processing duration, error message if any.
+```json
+{
+  "version": 1,
+  "type": "http_probe",
+  "tasks": [
+    {"key": "homepage", "input": "https://example.com/"}
+  ]
+}
+```
 
-## 6. Technology Choice and Rationale
+Manifest V1 accepts:
 
-**Language: Go (Golang)**
-- Go's `goroutine` model makes it easy to manage a large number of concurrent connections (requests coming from workers) using lightweight threads.
-- Its standard library (`net/http`, `encoding/json`) provides an HTTP server and JSON serialization without external dependencies.
-- As a compiled language that produces a single binary, deployment across different operating systems (Linux, macOS) is simple — a single file can be copied to each machine without a separate installation process.
-- Compared to C, the risk of memory management and socket programming errors (e.g. segmentation faults) is much lower, which increases development speed.
+- exactly version 1;
+- exactly one type for the manifest;
+- 1–1,000 tasks;
+- unique, nonempty user task keys up to 128 bytes;
+- nonempty string inputs up to 4,096 bytes;
+- a maximum document/request size of 5 MiB;
+- no unknown fields.
 
-## 7. Metrics to Measure
+The coordinator generates internal task IDs. User keys are correlation labels
+kept in coordinator state; workers do not receive them. Keys survive retries and
+worker reassignment. Final exported tasks preserve manifest order.
 
-Whether the system actually provides value should be verified through measurement, not assumption:
+Manifest V1 supports only `http_probe`.
 
-1. **Round-trip latency:** The time from the coordinator sending a task to a worker until it receives the result back (target: single-digit milliseconds, for network communication alone).
-2. **Task completion time:** The time each worker takes to finish its own task.
-3. **Total speedup:** Comparing the time it takes to complete the same job sequentially on a single machine versus in parallel across multiple machines. This number is the ultimate proof of whether the project delivers real value.
-4. **Coordinator overhead:** The additional time the coordinator spends on task distribution and result collection.
+### Simple mode
 
-## 8. Development Plan (Phased)
+Simple mode repeats one type/input pair a requested number of times. It exists
+for diagnostics and compatibility with built-in worker-local executors.
 
-**Phase 1 — Skeleton and communication test:**
-Verify that a dummy task can be sent between the two components (coordinator, worker) and a result received back. There is no real task logic yet; the goal is purely to prove the communication channel works. Round-trip latency is measured at this stage.
+## Built-in execution
 
-**Phase 2 — Node discovery:**
-Enable a newly joined worker to automatically find the coordinator and register itself, without manually entering an IP address.
+### `http_probe`
 
-**Phase 3 — Real task integration:**
-Replace the dummy task with an actual workload (e.g. a local language model call, a file analysis, a build/compile process).
+Performs one bounded HTTP `HEAD` request.
 
-**Phase 4 — Measurement and comparison:**
-Run the same job both on a single machine and in a distributed fashion, compare the durations, and calculate the actual speedup ratio.
+- HTTP and HTTPS only;
+- embedded URL credentials rejected;
+- normal target TLS verification;
+- 10-second request timeout;
+- at most five redirects;
+- no response body read;
+- no Inoculum Authorization header available to or forwarded by the executor;
+- LAN and private targets allowed.
 
-**Phase 5 (optional, advanced):**
-Smart task distribution based on worker load (prioritizing the least busy machine), fault tolerance (reassigning a task if a worker crashes).
+The structured result can include HTTP status, final URL, elapsed milliseconds,
+declared content length, and final TLS leaf-certificate expiry. Transport
+failures return sanitized categories and messages.
 
-## 9. Explicitly Out of Scope
+HTTP response statuses, including 4xx and 5xx, are successful probe results.
+DNS, connection, TLS, redirect, and timeout errors are executor failures and use
+the normal task retry policy.
 
-These decisions were made deliberately to keep the project's complexity manageable:
+### `diagnostic_sleep`
 
-- **Blockchain / cryptocurrency / token economy:** The system operates among trusted machines, so there is no need for a payment mechanism.
-- **Zero-Knowledge Proofs / verifiable computation:** There is no need to cryptographically prove that a computation was performed correctly.
-- **Splitting model layers across the network (pipeline parallelism):** Deliberately excluded due to the bandwidth bottleneck explained above.
-- **Building a distributed network over the public internet with unknown machines:** The system is designed for trusted machines on a local network; this is not a "public compute marketplace."
+A duplicate-safe diagnostic executor accepting a positive duration up to five
+minutes.
 
-*(Note: As of v2, the system includes fundamental LAN security—Shared Token Auth, TLS Encryption with TOFU Pinning, Replay Attack Protection, Rate Limiting, and Audit Logging—to defend against local network threats like ARP spoofing or rogue nodes. However, it still stops short of public-internet zero-trust architecture.)*
+### `file_analyze`
 
-## 10. Expected Outcome
+Counts lines, words, and bytes in a worker-local file. The resolved path must be
+within the worker's configured allowed paths. No file transfer occurs, so the
+file must exist on the worker that claims the task.
 
-The end result of this project: a minimal-dependency Go application, named **Inoculum**, managed from the terminal, that combines the processing power of two (or more) physical machines through automatic discovery and synchronization without user intervention, and delivers measurable, real speedup.
+## Result model
+
+Job status is derived from coordinator task state. A final manifest export
+contains:
+
+- job ID and terminal state;
+- one ordered result per manifest task;
+- user key;
+- task state;
+- attempt count;
+- final worker ID when available;
+- typed executor output;
+- structured failure details when available.
+
+A known partial failure still produces an output file before the submit process
+returns failure. Result exports contain no authentication secrets.
+
+## Network protocol
+
+All routes are served by the coordinator over one HTTPS listener and require the
+shared bearer token:
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/worker/claim` | Claim the next FIFO task when worker capacity is free |
+| `POST` | `/worker/renew` | Extend an active lease |
+| `POST` | `/worker/result` | Complete, retry, or permanently fail leased work |
+| `POST` | `/pull/submit` | Create an in-memory job and queued tasks |
+| `GET` | `/pull/job` | Read current job/task state |
+| `GET` | `/status` | Read pull-oriented coordinator status |
+
+Worker identity is an operational label, not a separate authentication
+principal. There are no worker listeners or worker certificates.
+
+## Security model
+
+- Coordinator HTTPS is mandatory.
+- The coordinator has one stable, persisted self-signed identity.
+- First client trust requires an explicit fingerprint.
+- Successful trust is saved per OS user and shared by worker and submit clients.
+- Unknown identities are never silently trusted.
+- API authentication uses `Authorization: Bearer` with one shared token.
+- A wrong coordinator identity is rejected before the token is sent.
+- There is no plaintext mode, mutual TLS, private CA, nonce cache, or timestamp
+  authentication dependency.
+- Sanitized audit logging is optional.
+
+This model targets user-controlled machines on a trusted LAN. Direct public
+internet exposure is outside V1's supported threat model.
+
+The shared token authorizes network probes to endpoints reachable from workers,
+including private endpoints.
+
+## Presentation
+
+Runtime/domain state is independent from terminal rendering. Interactive
+terminals receive a live coordinator, worker, or submit view. Non-interactive
+terminals and explicit plain mode receive line-oriented output without terminal
+control sequences.
+
+Presentation does not alter task, lease, retry, or protocol behavior.
+
+## State and persistence
+
+Coordinator state is memory-only. A coordinator restart loses queued tasks,
+leases, and job results. Manifest files remain the source for resubmission.
+
+Persistence is not part of V1.
+
+## Platform status
+
+- macOS: physically validated.
+- Linux amd64: physically validated against a macOS coordinator.
+- Windows amd64: cross-compiled and configuration-path logic unit-tested;
+  runtime unvalidated.
+
+## Explicit non-goals
+
+- arbitrary commands, shells, or executable plugins;
+- DAGs and task dependencies;
+- persistent services;
+- containers;
+- worker-to-worker data flow;
+- file upload or distribution;
+- distributed storage;
+- resource-aware scheduling and autoscaling;
+- coordinator persistence;
+- public-internet deployment.

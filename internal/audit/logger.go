@@ -3,17 +3,29 @@ package audit
 import (
 	"log/slog"
 	"os"
+	"sync"
 )
 
-var Logger *slog.Logger
+var (
+	mu     sync.RWMutex
+	logger *slog.Logger
+	file   *os.File
+)
 
 // InitLogger initializes the global JSON audit logger to a file.
 func InitLogger(logFile string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	if file != nil {
+		_ = file.Close()
+		file = nil
+		logger = nil
+	}
 	if logFile == "" {
-		return nil // No auditing if no file specified
+		return nil
 	}
 
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -21,13 +33,29 @@ func InitLogger(logFile string) error {
 	handler := slog.NewJSONHandler(f, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})
-	Logger = slog.New(handler)
+	file = f
+	logger = slog.New(handler)
 	return nil
+}
+
+// Close flushes and closes an explicitly enabled audit log.
+func Close() error {
+	mu.Lock()
+	defer mu.Unlock()
+	logger = nil
+	if file == nil {
+		return nil
+	}
+	err := file.Close()
+	file = nil
+	return err
 }
 
 // LogEvent logs a structured JSON audit event.
 func LogEvent(eventType, sourceIP, status, msg string, extra map[string]any) {
-	if Logger == nil {
+	mu.RLock()
+	defer mu.RUnlock()
+	if logger == nil {
 		return
 	}
 
@@ -41,5 +69,5 @@ func LogEvent(eventType, sourceIP, status, msg string, extra map[string]any) {
 		args = append(args, k, v)
 	}
 
-	Logger.Info(msg, args...)
+	logger.Info(msg, args...)
 }

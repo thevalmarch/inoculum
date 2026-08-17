@@ -2,47 +2,6 @@ package types
 
 import "time"
 
-// Status represents the current state of a task.
-type Status string
-
-const (
-	StatusPending    Status = "pending"
-	StatusProcessing Status = "processing"
-	StatusCompleted  Status = "completed"
-	StatusFailed     Status = "failed"
-)
-
-// WorkerInfo describes a worker node's identity and state.
-type WorkerInfo struct {
-	ID            string    `json:"id"`
-	Address       string    `json:"address"` // host:port
-	Hostname      string    `json:"hostname"`
-	CPUCores      int       `json:"cpu_cores"`
-	RAMBytes      uint64    `json:"ram_bytes"`
-	GPUInfo       string    `json:"gpu_info,omitempty"`
-	LastHeartbeat time.Time `json:"last_heartbeat"`
-	Busy          bool      `json:"busy"`
-	ActiveTasks   int       `json:"active_tasks"`
-}
-
-// Task is the smallest unit of work assigned to a single worker.
-type Task struct {
-	ID       string `json:"id"`
-	JobID    string `json:"job_id"`
-	Type     string `json:"type"`     // e.g. "dummy", "file_analyze", "http_fetch"
-	Input    string `json:"input"`    // task-specific input data
-	Status   Status `json:"status"`
-	WorkerID string `json:"worker_id,omitempty"`
-}
-
-// Job is a high-level request submitted by the user, broken into tasks.
-type Job struct {
-	ID          string    `json:"id"`
-	Tasks       []Task    `json:"tasks"`
-	Status      Status    `json:"status"`
-	SubmittedAt time.Time `json:"submitted_at"`
-}
-
 // Result contains the output produced by a worker for a single task.
 type Result struct {
 	TaskID      string        `json:"task_id"`
@@ -52,75 +11,130 @@ type Result struct {
 	Error       string        `json:"error,omitempty"`
 }
 
-// --- Request / Response types for HTTP endpoints ---
-
-// RegisterRequest is sent by a worker to POST /register.
-type RegisterRequest struct {
-	ID       string `json:"id"`
-	Address  string `json:"address"`
-	Hostname string `json:"hostname"`
-	CPUCores int    `json:"cpu_cores"`
-	RAMBytes uint64 `json:"ram_bytes"`
-	GPUInfo  string `json:"gpu_info,omitempty"`
+// HTTPProbeOutput is encoded into Result.Output by the fixed http_probe
+// executor. Keeping it typed makes manifest result export deterministic.
+type HTTPProbeOutput struct {
+	StatusCode            int    `json:"status_code,omitempty"`
+	FinalURL              string `json:"final_url,omitempty"`
+	ElapsedMilliseconds   int64  `json:"elapsed_ms"`
+	DeclaredContentLength *int64 `json:"declared_content_length,omitempty"`
+	TLSCertificateExpiry  string `json:"tls_certificate_expiry,omitempty"`
+	ErrorCategory         string `json:"error_category,omitempty"`
+	ErrorMessage          string `json:"error_message,omitempty"`
 }
 
-// RegisterResponse is returned by the coordinator after registration.
-type RegisterResponse struct {
-	OK      bool   `json:"ok"`
-	Message string `json:"message"`
+// PullStatus is an explicit protocol outcome for the pull-based execution path.
+type PullStatus string
+
+const (
+	PullTaskAvailable PullStatus = "task_available"
+	PullNoTask        PullStatus = "no_task_available"
+	PullLeaseRenewed  PullStatus = "lease_renewed"
+	PullTaskCompleted PullStatus = "task_completed"
+	PullTaskRequeued  PullStatus = "task_requeued"
+	PullTaskFailed    PullStatus = "task_failed"
+	PullStaleLease    PullStatus = "stale_lease"
+	PullRejected      PullStatus = "rejected"
+)
+
+type PullTask struct {
+	TaskID         string    `json:"task_id"`
+	JobID          string    `json:"job_id"`
+	Type           string    `json:"type"`
+	Input          string    `json:"input"`
+	LeaseID        string    `json:"lease_id"`
+	Attempt        int       `json:"attempt"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
 }
 
-// HeartbeatRequest is sent by a worker to POST /heartbeat.
-type HeartbeatRequest struct {
-	ID string `json:"id"`
+type PullClaimRequest struct {
+	WorkerID string `json:"worker_id"`
 }
 
-// HeartbeatResponse is returned by the coordinator.
-type HeartbeatResponse struct {
-	OK bool `json:"ok"`
+type PullClaimResponse struct {
+	Status PullStatus `json:"status"`
+	Task   *PullTask  `json:"task,omitempty"`
 }
 
-// SubmitJobRequest is sent by a user to POST /submit-job.
-type SubmitJobRequest struct {
-	TaskType string   `json:"task_type"`  // type of tasks to create
-	Inputs   []string `json:"inputs"`     // one input per task
+type PullRenewRequest struct {
+	WorkerID string `json:"worker_id"`
+	TaskID   string `json:"task_id"`
+	LeaseID  string `json:"lease_id"`
 }
 
-// SubmitJobResponse is returned after a job is processed.
-type SubmitJobResponse struct {
-	JobID          string        `json:"job_id"`
-	Results        []Result      `json:"results"`
-	TotalDuration  time.Duration `json:"total_duration_ns"`
-	TotalDurationS string        `json:"total_duration"`
-	RoundTrips     []RoundTrip   `json:"round_trips"`
+type PullRenewResponse struct {
+	Status         PullStatus `json:"status"`
+	LeaseExpiresAt time.Time  `json:"lease_expires_at,omitempty"`
+	Message        string     `json:"message,omitempty"`
 }
 
-// RoundTrip captures latency metrics for a single task dispatch.
-type RoundTrip struct {
-	TaskID   string        `json:"task_id"`
-	WorkerID string        `json:"worker_id"`
-	Latency  time.Duration `json:"latency_ns"`
-	LatencyS string        `json:"latency"`
+type PullResultRequest struct {
+	WorkerID string `json:"worker_id"`
+	TaskID   string `json:"task_id"`
+	LeaseID  string `json:"lease_id"`
+	Result   Result `json:"result"`
 }
 
-// ExecuteRequest is sent by the coordinator to a worker's POST /execute.
-type ExecuteRequest struct {
-	Task Task `json:"task"`
+type PullResultResponse struct {
+	Status  PullStatus `json:"status"`
+	Message string     `json:"message,omitempty"`
 }
 
-// ExecuteResponse is returned by the worker after executing a task.
-type ExecuteResponse struct {
-	Result Result `json:"result"`
+type PullSubmitRequest struct {
+	TaskType string           `json:"task_type"`
+	Inputs   []string         `json:"inputs,omitempty"`
+	Tasks    []PullSubmitTask `json:"tasks,omitempty"`
 }
 
-// StatusResponse is returned by GET /status.
-type StatusResponse struct {
-	ActiveWorkers  int    `json:"active_workers"`
-	TotalWorkers   int    `json:"total_workers"`
-	PendingTasks   int    `json:"pending_tasks"`
-	RunningTasks   int    `json:"running_tasks"`
-	CompletedTasks int    `json:"completed_tasks"`
-	FailedTasks    int    `json:"failed_tasks"`
-	TotalJobs      int    `json:"total_jobs"`
-	Uptime         string `json:"uptime"`
+// PullSubmitTask carries a user correlation key only as far as the
+// coordinator. Workers continue to receive the existing type + input payload.
+type PullSubmitTask struct {
+	Key   string `json:"key"`
+	Input string `json:"input"`
+}
+
+type PullSubmitResponse struct {
+	JobID   string   `json:"job_id"`
+	TaskIDs []string `json:"task_ids"`
+}
+
+type PullJobState string
+
+const (
+	PullJobQueued    PullJobState = "queued"
+	PullJobRunning   PullJobState = "running"
+	PullJobCompleted PullJobState = "completed"
+	PullJobFailed    PullJobState = "failed"
+)
+
+type PullJobTask struct {
+	TaskID   string  `json:"task_id"`
+	Key      string  `json:"key,omitempty"`
+	State    string  `json:"state"`
+	Attempts int     `json:"attempts"`
+	WorkerID string  `json:"worker_id,omitempty"`
+	Result   *Result `json:"result,omitempty"`
+}
+
+type PullJobResponse struct {
+	JobID string        `json:"job_id"`
+	State PullJobState  `json:"state"`
+	Tasks []PullJobTask `json:"tasks"`
+}
+
+type PullWorkerStatus struct {
+	WorkerID     string    `json:"worker_id"`
+	LastActivity time.Time `json:"last_activity"`
+	ActiveLeases int       `json:"active_leases"`
+}
+
+type CoordinatorStatusResponse struct {
+	QueuedTasks    int                `json:"queued_tasks"`
+	LeasedTasks    int                `json:"leased_tasks"`
+	CompletedTasks int                `json:"completed_tasks"`
+	FailedTasks    int                `json:"failed_tasks"`
+	TotalTasks     int                `json:"total_tasks"`
+	TotalJobs      int                `json:"total_jobs"`
+	RecentWorkers  []PullWorkerStatus `json:"recent_workers"`
+	Uptime         string             `json:"uptime"`
 }

@@ -1,5 +1,7 @@
 # Binaries
 bin/
+build/
+release/
 
 # OS/Editor specific
 .DS_Store
@@ -13,7 +15,7 @@ bin/
 .env
 .env.local
 
-# Inoculum v2 artifacts
+# Local Inoculum security state
 .inoculum-*-cert.pem
 .inoculum-*-key.pem
 .inoculum-*-known-hosts

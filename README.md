@@ -1,161 +1,464 @@
 # Inoculum
 
-**LAN-based distributed compute daemon — zero dependencies, pure Go.**
+Turn the computers you already own into a tiny compute pool.
 
-Inoculum combines the processing power of multiple machines on a local network by distributing independent tasks across them in parallel. Each machine runs its own task completely — no shared state, no inter-node data flow, no bandwidth bottleneck.
+Inoculum is a small LAN execution pool for independent, finite jobs. Run one
+coordinator, connect outbound workers from your other machines, submit a batch,
+and let leases and retries handle worker failure.
 
-> **Measured result:** 1.6x real-world speedup across 2 workers on a home LAN, with TLS encryption and authentication enabled.
+It is designed for 2–10 user-owned machines on a trusted LAN. Inoculum is not a
+cluster orchestrator, workflow engine, distributed filesystem, or public compute
+service.
 
-## Why task parallelism?
+## Why Inoculum?
 
-Splitting a model's layers across machines (pipeline parallelism) requires continuous data transfer between nodes. On a typical LAN (~125 MB/s), this creates a **1000x bottleneck** compared to local memory bandwidth — making it slower than a single machine.
+Sometimes a workload is already a collection of independent pieces: probe many
+URLs, inspect separate inputs, or run duplicate-safe diagnostics. Those pieces do
+not need a DAG, containers, a message broker, or a permanent cluster.
 
-Inoculum takes the opposite approach: send a small task description (a few KB), let each machine work independently, collect the result. The network only carries instructions and answers, not intermediate data.
+Inoculum provides a deliberately small middle ground:
 
-## Quick Start
+- one coordinator address and port;
+- one FIFO queue with lease-based task ownership;
+- workers that pull only when they have local capacity;
+- automatic reassignment when a worker disappears;
+- terminal progress and machine-readable results.
+
+## Quick demo
+
+The commands below assume the binary is available as `./inoculum`. A development
+build is written to `./build/inoculum`; either path works.
+
+Start the coordinator:
 
 ```bash
-# Build
-go build -o bin/coordinator ./cmd/coordinator
-go build -o bin/worker     ./cmd/worker
-go build -o bin/benchmark  ./cmd/benchmark
+export INOCULUM_TOKEN='a-long-random-secret'
+./inoculum coordinator --port 8080
 ```
 
-**1. Start the coordinator** (note the fingerprint it prints):
+Copy the fingerprint it prints, then connect a worker:
+
 ```bash
-./bin/coordinator -port 8080 -token mysecret
+export INOCULUM_TOKEN='a-long-random-secret'
+./inoculum worker \
+  --coordinator 192.168.0.5:8080 \
+  --id mac-worker \
+  --coordinator-fingerprint '<fingerprint>'
 ```
 
-**2. Start one or more workers** (use the fingerprint from step 1):
+Submit four duplicate-safe diagnostic tasks:
+
 ```bash
-./bin/worker -port 9000 -coordinator localhost:8080 \
-  -token mysecret -coordinator-fingerprint <FINGERPRINT>
-
-./bin/worker -port 9001 -coordinator localhost:8080 \
-  -token mysecret -coordinator-fingerprint <FINGERPRINT>
+export INOCULUM_TOKEN='a-long-random-secret'
+./inoculum submit \
+  --coordinator 192.168.0.5:8080 \
+  --type diagnostic_sleep \
+  --input 2s \
+  --tasks 4
 ```
 
-**3. Run the benchmark:**
+Start the same worker command on another machine with a different `--id` to add
+it to the pool.
+
+## How it works
+
+```text
+                submit
+                  |
+                  v
+            +-------------+
+            | coordinator |
+            +-------------+
+              ^         ^
+              |         |
+       outbound pull  outbound pull
+              |         |
+        +----------+ +----------+
+        | worker A | | worker B |
+        +----------+ +----------+
+```
+
+Only the coordinator listens for Inoculum connections. It owns the task queue
+and leases. Workers connect outbound, claim tasks, renew their leases while
+executing, and return results. Workers do not advertise an address or listen for
+incoming tasks.
+
+If a worker disappears, its lease expires and the same stable task becomes
+available to another worker. Delivery is therefore **at least once**: a task can
+run more than once if a worker finishes but its result is lost. Workloads must be
+safe under duplicate execution.
+
+## Releases and installation
+
+Inoculum is one Go binary with three subcommands:
+
+```text
+inoculum coordinator
+inoculum worker
+inoculum submit
+```
+
+Release `v1.0.0` uses one archive per platform:
+
+- `inoculum_v1.0.0_darwin_arm64.tar.gz`
+- `inoculum_v1.0.0_linux_amd64.tar.gz`
+- `inoculum_v1.0.0_windows_amd64.zip`
+
+Each archive contains the platform binary and `LICENSE`. Download the matching
+archive and `SHA256SUMS` from the release after it is published.
+
+On macOS, verify, extract, and run the arm64 archive:
+
 ```bash
-./bin/benchmark -coordinator localhost:8080 -tasks 10 -type dummy \
-  -token mysecret -coordinator-fingerprint <FINGERPRINT>
+grep 'darwin_arm64' SHA256SUMS | shasum -a 256 -c -
+tar -xzf inoculum_v1.0.0_darwin_arm64.tar.gz
+./inoculum --version
 ```
 
-Workers on other machines will auto-discover the coordinator via UDP broadcast — no IP configuration needed. If your network blocks broadcasts, use `-coordinator <IP>:8080` explicitly.
+You may move `inoculum` into a directory on your `PATH`, such as
+`/usr/local/bin`. The v1.0.0 binary is unsigned and not notarized, so macOS may
+require you to explicitly allow it in local Privacy & Security settings.
 
-## How It Works
+On Linux amd64:
 
-```
-                    ┌──────────────────┐
-                    │   Coordinator    │
- User ──POST───▶   │  • Registry      │   ◀──heartbeat──  Workers
-  /submit-job       │  • Scheduler     │
-                    │  • Rate Limiter  │
-                    └──────┬───────────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │ Worker 1 │ │ Worker 2 │ │ Worker N │
-        │ /execute │ │ /execute │ │ /execute │
-        └──────────┘ └──────────┘ └──────────┘
+```bash
+grep 'linux_amd64' SHA256SUMS | sha256sum -c -
+tar -xzf inoculum_v1.0.0_linux_amd64.tar.gz
+chmod +x inoculum
+./inoculum --version
 ```
 
-The coordinator accepts jobs, splits them into tasks, and distributes them across available workers using round-robin or least-busy scheduling. If a worker crashes mid-task, the coordinator automatically retries on another worker (up to 2 retries). Workers that stop sending heartbeats are removed from the pool after 30 seconds.
+Move `inoculum` to a directory on your `PATH` if desired.
 
-## Security
+The Windows amd64 archive is **experimental**. It is compile-tested and its
+configuration-path behavior is unit-tested, but the runtime has not been
+physically validated on Windows. Extract the zip and run:
 
-All traffic is encrypted and authenticated — designed to defend against real LAN threats (ARP spoofing, rogue nodes, traffic interception):
-
-| Layer | How it works |
-|-------|-------------|
-| **Token Auth** | Shared secret (`-token`) verified on every request |
-| **TLS Encryption** | Auto-generated certificates, persisted across restarts |
-| **TOFU Pinning** | Certificate fingerprints pinned on first contact (SSH-style `known_hosts`) |
-| **Replay Protection** | Unique nonce + timestamp on every request; 30s window |
-| **Path Traversal Guard** | `file_analyze` restricted to `-allowed-paths` directories |
-| **Rate Limiting** | Token bucket per IP on `/submit-job` (60 burst, 1/sec steady) |
-| **Audit Log** | All events written as structured JSON to `inoculum-audit.log` |
-
-## Task Types
-
-| Type | Description | Input |
-|------|-------------|-------|
-| `dummy` | Sleeps 10ms, returns a message (for benchmarking) | Any string |
-| `file_analyze` | Counts lines, words, and bytes in a file | File path |
-| `http_fetch` | Fetches a URL, returns status + content length | URL |
-
-## API
-
-**Coordinator** exposes:
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/register` | Worker registration |
-| `POST` | `/heartbeat` | Worker alive signal |
-| `POST` | `/submit-job` | Submit a job |
-| `GET` | `/status` | System status |
-
-**Workers** expose:
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/execute` | Execute a task |
-
-All endpoints require `X-Inoculum-Token`, `X-Inoculum-Nonce`, and `X-Inoculum-Timestamp` headers.
-
-## Configuration Flags
-
-**Coordinator:**
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-port` | `8080` | HTTPS listen port |
-| `-token` | *required* | Shared authentication secret |
-| `-strategy` | `round-robin` | Scheduling: `round-robin` or `least-busy` |
-| `-discovery` | `true` | Enable UDP broadcast discovery |
-| `-audit-log` | `inoculum-audit.log` | Audit log file path |
-
-**Worker:**
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-port` | `9000` | HTTPS listen port |
-| `-coordinator` | *auto-discover* | Coordinator address (`host:port`) |
-| `-token` | *required* | Shared authentication secret |
-| `-coordinator-fingerprint` | — | Pinned coordinator certificate fingerprint |
-| `-concurrency` | `1` | Max concurrent tasks |
-| `-allowed-paths` | `.` | Directories allowed for `file_analyze` |
-| `-audit-log` | `inoculum-audit.log` | Audit log file path |
-
-## Project Structure
-
+```powershell
+.\inoculum.exe --version
 ```
-├── cmd/
-│   ├── coordinator/main.go     # Coordinator entry point
-│   ├── worker/main.go          # Worker entry point
-│   └── benchmark/main.go       # Benchmark tool
-├── internal/
-│   ├── types/types.go          # Shared data structures
-│   ├── audit/logger.go         # Structured JSON audit logger
-│   ├── auth/
-│   │   ├── auth.go             # Token middleware + nonce validation
-│   │   └── replay.go           # NonceCache for replay protection
-│   ├── coordinator/
-│   │   ├── server.go           # HTTPS server & handlers
-│   │   ├── scheduler.go        # Scheduling strategies
-│   │   ├── registry.go         # Worker registry & heartbeats
-│   │   └── ratelimit.go        # Token bucket rate limiter
-│   ├── crypto/tls.go           # TLS cert generation & TOFU pinning
-│   ├── worker/
-│   │   ├── server.go           # Worker HTTPS server
-│   │   ├── executor.go         # Task executors
-│   │   ├── executor_test.go    # Path traversal tests
-│   │   └── registration.go     # Coordinator registration
-│   └── discovery/udp.go        # UDP broadcast auto-discovery
-├── SPEC.md                     # Full technical specification
-├── LICENSE                     # MIT
-└── README.md
+
+No release binaries are currently signed.
+
+### Build from source
+
+Native development build:
+
+```bash
+go build -o build/inoculum ./cmd/inoculum
+./build/inoculum --version
 ```
+
+An ordinary source build reports `inoculum dev`. Release builds inject the
+version with this linker assignment:
+
+```text
+-X github.com/inoculum/internal/version.Value=v1.0.0
+```
+
+No commit SHA, build date, local path, or machine identity is included in
+`--version` output.
+
+Linux amd64 cross-build:
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -o build/inoculum-linux-amd64 ./cmd/inoculum
+```
+
+Windows amd64 compile-only build:
+
+```bash
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+  go build -o build/inoculum-windows-amd64.exe ./cmd/inoculum
+```
+
+Copy the appropriate binary to each machine using your normal software or file
+distribution method. Inoculum does not transfer its own binaries.
+
+## Quick start on a LAN
+
+Choose the coordinator machine's LAN address. The examples use `192.168.0.5`.
+
+### 1. Start the coordinator
+
+```bash
+export INOCULUM_TOKEN='a-long-random-secret'
+./inoculum coordinator --port 8080
+```
+
+The coordinator prints its address and certificate fingerprint. Keep the token
+private and use the same value on each client machine.
+
+### 2. Trust and start each worker
+
+On the first connection from a machine, provide the fingerprint printed by the
+coordinator:
+
+```bash
+export INOCULUM_TOKEN='a-long-random-secret'
+./inoculum worker \
+  --coordinator 192.168.0.5:8080 \
+  --id linux-worker \
+  --coordinator-fingerprint '<fingerprint>'
+```
+
+After successful verification, the coordinator identity is saved locally.
+Subsequent worker starts on that machine do not need the fingerprint:
+
+```bash
+export INOCULUM_TOKEN='a-long-random-secret'
+./inoculum worker \
+  --coordinator 192.168.0.5:8080 \
+  --id linux-worker
+```
+
+Worker and submit commands run by the same OS user share this saved trust
+record. A different machine or OS user must perform its own first verification.
+
+### 3. Submit work
+
+Once trust is established on the submitting machine:
+
+```bash
+export INOCULUM_TOKEN='a-long-random-secret'
+./inoculum submit \
+  --coordinator 192.168.0.5:8080 \
+  --type diagnostic_sleep \
+  --input 2s \
+  --tasks 4
+```
+
+`--timeout` limits how long the client waits. If it expires, the coordinator job
+is not marked failed and can continue running.
+
+## Real workload: HTTP probe manifests
+
+`http_probe` is Inoculum's first bounded real workload. A versioned JSON manifest
+turns distinct inputs into independent tasks with stable user-defined keys.
+
+Create `probes.json`:
+
+```json
+{
+  "version": 1,
+  "type": "http_probe",
+  "tasks": [
+    {"key": "homepage", "input": "https://example.com/"},
+    {"key": "docs", "input": "https://example.com/docs"}
+  ]
+}
+```
+
+Submit it and save the detailed result:
+
+```bash
+export INOCULUM_TOKEN='a-long-random-secret'
+./inoculum submit \
+  --coordinator 192.168.0.5:8080 \
+  --manifest probes.json \
+  --output probe-results.json \
+  --timeout 2m
+```
+
+Each task is independent. Workers naturally share the batch by pulling work as
+capacity becomes available. Retries preserve the user key, and the exported
+tasks remain in manifest order.
+
+Manifest V1 accepts one `http_probe` type and up to 1,000 tasks. Keys must be
+unique. Inputs and the overall document are bounded so one submission cannot
+grow without limit.
+
+An HTTP probe performs a bounded `HEAD` request with normal target TLS
+verification and limited redirects. It records the HTTP status, final URL,
+elapsed time, declared content length, TLS certificate expiry when available,
+attempt count, and final worker.
+
+## Result export
+
+`--output` is strongly recommended for manifest submissions. Normal terminal
+output stays progress-oriented while the JSON file contains per-task detail:
+
+```json
+{
+  "job_id": "pull-job-1787005804821661000",
+  "state": "completed",
+  "tasks": [
+    {
+      "key": "homepage",
+      "state": "completed",
+      "attempts": 1,
+      "worker": "mac-worker",
+      "output": {
+        "status_code": 200,
+        "final_url": "https://example.com/",
+        "elapsed_ms": 42,
+        "declared_content_length": 1256,
+        "tls_certificate_expiry": "2026-11-10T23:59:59Z"
+      }
+    }
+  ]
+}
+```
+
+Known final failures are also exported before submit exits nonzero. Failed tasks
+include a structured error category and message where available. Result files do
+not contain Inoculum tokens or Authorization headers.
+
+## Simple submit mode
+
+Simple mode repeats one input a requested number of times. It remains useful for
+diagnostics and lease/failover testing:
+
+```bash
+./inoculum submit \
+  --coordinator 192.168.0.5:8080 \
+  --type diagnostic_sleep \
+  --input 2s \
+  --tasks 4
+```
+
+Use manifest mode when a real batch contains distinct inputs. Manifest mode
+cannot be combined with `--type`, `--input`, or `--tasks`.
+
+## Terminal and plain modes
+
+On a supported interactive terminal, coordinator, worker, and submit commands
+show a restrained live TUI. It summarizes connectivity, workers, active work,
+progress, and failures without printing one line per task.
+
+Inoculum automatically uses stable line-oriented output for redirected output,
+CI, `TERM=dumb`, and other non-interactive environments. It never emits terminal
+control sequences in plain mode.
+
+Useful presentation flags:
+
+| Flag | Purpose |
+|---|---|
+| `--plain` | Force line-oriented output |
+| `--verbose` | Include additional diagnostic detail |
+| `--no-color` | Disable color |
+| `--ascii` | Avoid Unicode status symbols |
+| `--log-file <path>` | Set the operational log used by the interactive UI |
+
+No terminal screenshots are currently included in the repository.
+
+## Security model
+
+Inoculum is intended for a small, trusted, user-controlled LAN. Direct exposure
+to the public internet is unsupported.
+
+- The coordinator serves HTTPS only, using one stable self-signed identity.
+- First trust requires an explicit coordinator fingerprint; there is no silent
+  trust on first use.
+- Successful verification saves the coordinator identity for later worker and
+  submit runs by the same OS user.
+- Every API request uses `Authorization: Bearer` with the shared token.
+- The token is accepted through `INOCULUM_TOKEN` or `--token`; environment use is
+  recommended to keep it out of shell history and process arguments.
+- There are no worker certificates, mutual TLS, plaintext mode, nonce cache, or
+  clock-based authentication checks.
+- Optional sanitized coordinator audit logging is available with
+  `--audit-log <path>`.
+
+Possession of the shared token authorizes workers to perform `http_probe`
+requests to HTTP and HTTPS addresses reachable from those workers, including LAN
+and private endpoints. Give the token only to machines you control.
+
+## Lease and retry behavior
+
+The coordinator owns one global lease and retry policy:
+
+| Coordinator flag | Default | Meaning |
+|---|---:|---|
+| `--lease-duration` | `6s` | Time a worker owns a task unless it renews the lease |
+| `--max-attempts` | `3` | Maximum claims/execution attempts before permanent failure |
+
+Claiming a task creates a lease. An active worker renews it while executing. If
+the worker disappears, the lease expires and the same task returns to the FIFO
+queue. Its stable identity and manifest key survive reassignment, while the
+attempt count increases.
+
+Lease behavior is at least once, not exactly once. Executors should avoid
+non-idempotent side effects or otherwise tolerate duplicate execution.
+
+## Built-in task types
+
+| Type | Intended use | Input |
+|---|---|---|
+| `http_probe` | Bounded HTTP/TLS endpoint inspection; primary manifest workload | One absolute HTTP or HTTPS URL |
+| `diagnostic_sleep` | Duplicate-safe lease, retry, and distribution testing | A duration up to 5 minutes, such as `2s` |
+| `file_analyze` | Counts lines, words, and bytes in a worker-local file | A local file path allowed by the worker's `--allowed-paths` |
+
+`file_analyze` does not transfer files. The referenced path must exist and be
+allowed on whichever worker claims the task. It is therefore most appropriate
+for deliberately pre-staged or consistently mounted data.
+
+Inoculum does not execute arbitrary shell commands or external programs.
+
+## Platform support
+
+| Platform | Status |
+|---|---|
+| macOS | Physically validated as coordinator, worker, and submit client |
+| Linux amd64 | Physically validated as an outbound worker against a macOS coordinator |
+| Windows amd64 | Cross-compiles and has configuration-path unit coverage; runtime is unvalidated |
+
+The validated Mac/Linux path includes HTTPS trust, task distribution, result
+reporting, worker disappearance, lease expiry, and reassignment.
+
+## Limitations and non-goals
+
+V1 deliberately does not provide:
+
+- arbitrary shell or command execution;
+- DAGs or task dependencies;
+- persistent services;
+- containers or environment management;
+- worker-to-worker communication;
+- file upload, file distribution, or a distributed filesystem;
+- dynamic plugins;
+- resource-aware scheduling or worker capability negotiation;
+- autoscaling;
+- coordinator state persistence;
+- public-internet-grade deployment.
+
+The coordinator keeps queue and job state in memory. Restarting it loses queued,
+leased, and completed job state. The original manifest remains the resubmission
+source. Persistence can be reconsidered if real long-running workloads justify
+the extra operational complexity.
+
+## Development and verification
+
+Run the complete checks from the repository root:
+
+```bash
+go test -count=1 ./...
+go test -race -count=1 ./...
+go vet ./...
+go mod verify
+git diff --check
+```
+
+Build the canonical executable with:
+
+```bash
+go build -o build/inoculum ./cmd/inoculum
+```
+
+Create all v1.0.0 release archives and checksums on macOS with:
+
+```bash
+./scripts/release.sh v1.0.0
+```
+
+The script replaces `release/` with three clean platform archives and
+`SHA256SUMS`. It uses temporary staging directories, so repository logs, build
+outputs, certificates, trust records, probe results, and other local state are
+not candidates for archive inclusion. The release notes draft is
+[docs/releases/v1.0.0.md](docs/releases/v1.0.0.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Inoculum is available under the Apache License 2.0. Copyright 2026
+Volkan 'Val March' Söylemez. See [LICENSE](LICENSE).
