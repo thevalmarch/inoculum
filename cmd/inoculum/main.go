@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"github.com/inoculum/internal/cli"
+	"github.com/thevalmarch/inoculum/internal/cli"
 )
 
 func main() {

@@ -94,7 +94,9 @@ Manifest V1 supports only `http_probe`.
 ### Simple mode
 
 Simple mode repeats one type/input pair a requested number of times. It exists
-for diagnostics and compatibility with built-in worker-local executors.
+for diagnostics and compatibility with built-in worker-local executors. It is
+bounded to 1–1,000 tasks, a 4,096-byte input, and the same 5 MiB submission
+request limit as manifest mode.
 
 ## Built-in execution
 
@@ -123,12 +125,6 @@ the normal task retry policy.
 
 A duplicate-safe diagnostic executor accepting a positive duration up to five
 minutes.
-
-### `file_analyze`
-
-Counts lines, words, and bytes in a worker-local file. The resolved path must be
-within the worker's configured allowed paths. No file transfer occurs, so the
-file must exist on the worker that claims the task.
 
 ## Result model
 
@@ -163,6 +159,11 @@ shared bearer token:
 
 Worker identity is an operational label, not a separate authentication
 principal. There are no worker listeners or worker certificates.
+
+Worker API requests are limited to 128 KiB. Worker IDs are restricted to 64
+safe printable ASCII bytes; task and lease identifiers are similarly bounded.
+Result output is limited to 64 KiB and result error text to 4 KiB. JSON request
+bodies reject unknown fields and trailing values.
 
 ## Security model
 

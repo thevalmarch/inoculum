@@ -4,8 +4,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/inoculum/internal/leasequeue"
-	"github.com/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/leasequeue"
+	"github.com/thevalmarch/inoculum/internal/monitor"
 )
 
 // MonitorSnapshot returns an immutable, presentation-neutral view of the

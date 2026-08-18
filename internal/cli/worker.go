@@ -7,20 +7,19 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
-	"github.com/inoculum/internal/presentation"
-	"github.com/inoculum/internal/presentation/plain"
-	"github.com/inoculum/internal/presentation/tui"
-	"github.com/inoculum/internal/worker"
+	"github.com/thevalmarch/inoculum/internal/presentation"
+	"github.com/thevalmarch/inoculum/internal/presentation/plain"
+	"github.com/thevalmarch/inoculum/internal/presentation/tui"
+	"github.com/thevalmarch/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/worker"
 )
 
 type workerOptions struct {
 	coordinator  string
 	workerID     string
 	concurrency  int
-	allowed      string
 	token        string
 	fingerprint  string
 	presentation presentationFlags
@@ -39,6 +38,11 @@ func RunWorker(args []string, streams Streams) error {
 	if options.concurrency <= 0 {
 		return usageErrorf("--concurrency must be positive")
 	}
+	if options.workerID != "" {
+		if err := types.ValidateWorkerID(options.workerID); err != nil {
+			return usageErrorf("invalid --id: %v", err)
+		}
+	}
 	token, err := resolveToken(options.token)
 	if err != nil {
 		return err
@@ -52,7 +56,6 @@ func parseWorkerOptions(args []string, streams Streams) (workerOptions, error) {
 	set.StringVar(&options.coordinator, "coordinator", "", "Coordinator address (host:port)")
 	set.StringVar(&options.workerID, "id", "", "Worker ID; defaults from hostname")
 	set.IntVar(&options.concurrency, "concurrency", 1, "Number of independent execution loops")
-	set.StringVar(&options.allowed, "allowed-paths", ".", "Comma-separated directories allowed for file_analyze")
 	set.StringVar(&options.token, "token", "", "Shared bearer token; prefer INOCULUM_TOKEN")
 	set.StringVar(&options.fingerprint, "coordinator-fingerprint", "", "Coordinator fingerprint required on first trust or intentional identity replacement")
 	addPresentationFlags(set, &options.presentation, "inoculum-worker.log")
@@ -74,20 +77,12 @@ func runWorker(options workerOptions, token string, streams Streams) error {
 		workerID = fmt.Sprintf("worker-%s", hostname)
 	}
 
-	var allowedPaths []string
-	for _, path := range strings.Split(options.allowed, ",") {
-		if path = strings.TrimSpace(path); path != "" {
-			allowedPaths = append(allowedPaths, path)
-		}
-	}
-
 	pullWorker, err := worker.NewPullWorker(worker.PullConfig{
 		CoordinatorAddr: options.coordinator,
 		WorkerID:        workerID,
 		Token:           token,
 		Fingerprint:     options.fingerprint,
 		Concurrency:     options.concurrency,
-		AllowedPaths:    allowedPaths,
 	})
 	if err != nil {
 		return err

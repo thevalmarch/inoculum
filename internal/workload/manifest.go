@@ -16,6 +16,7 @@ const (
 	MaxTasks         = 1000
 	MaxKeyBytes      = 128
 	MaxInputBytes    = 4096
+	MaxTaskTypeBytes = 64
 )
 
 type Manifest struct {
@@ -71,10 +72,31 @@ func ValidateManifest(manifest Manifest) error {
 	if manifest.Type == "" {
 		return fmt.Errorf("manifest type is required")
 	}
+	if err := ValidateTaskType(manifest.Type); err != nil {
+		return fmt.Errorf("manifest %w", err)
+	}
 	if manifest.Type != HTTPProbeType {
 		return fmt.Errorf("unsupported manifest task type %q; supported type is %q", manifest.Type, HTTPProbeType)
 	}
 	return ValidateTasks(manifest.Tasks)
+}
+
+// ValidateTaskType bounds and constrains the executor selector before it is
+// retained in coordinator memory or included in worker-visible errors.
+func ValidateTaskType(taskType string) error {
+	if taskType == "" {
+		return fmt.Errorf("task type is required")
+	}
+	if len(taskType) > MaxTaskTypeBytes {
+		return fmt.Errorf("task type exceeds the %d-byte limit", MaxTaskTypeBytes)
+	}
+	for _, character := range taskType {
+		if (character >= 'a' && character <= 'z') || character == '_' {
+			continue
+		}
+		return fmt.Errorf("task type may contain only lowercase letters and '_'")
+	}
+	return nil
 }
 
 func ValidateTasks(tasks []Task) error {
@@ -102,6 +124,23 @@ func ValidateTasks(tasks []Task) error {
 		}
 		if len(task.Input) > MaxInputBytes {
 			return fmt.Errorf("manifest task %q input exceeds the %d-byte limit", task.Key, MaxInputBytes)
+		}
+	}
+	return nil
+}
+
+// ValidateSimpleInputs applies the same V1 queue-amplification bounds as
+// manifest mode while preserving simple mode's repeated-input semantics.
+func ValidateSimpleInputs(inputs []string) error {
+	if len(inputs) == 0 {
+		return fmt.Errorf("at least one input is required")
+	}
+	if len(inputs) > MaxTasks {
+		return fmt.Errorf("simple submission contains %d tasks; maximum is %d", len(inputs), MaxTasks)
+	}
+	for index, input := range inputs {
+		if len(input) > MaxInputBytes {
+			return fmt.Errorf("simple submission input %d exceeds the %d-byte limit", index, MaxInputBytes)
 		}
 	}
 	return nil

@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/inoculum/internal/leasequeue"
-	"github.com/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/leasequeue"
+	"github.com/thevalmarch/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/workload"
 )
 
 func newPullTestServer(t *testing.T) *Server {
@@ -124,6 +126,116 @@ func requestJSON(t *testing.T, handler http.HandlerFunc, method, target string, 
 	return recorder.Code
 }
 
+func requestBody(handler http.HandlerFunc, target, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+	handler(recorder, req)
+	return recorder
+}
+
+func TestHTTPServerUsesConservativeTimeouts(t *testing.T) {
+	server := newPullTestServer(t).httpServer()
+	if server.ReadHeaderTimeout != 5*time.Second || server.WriteTimeout != 30*time.Second || server.IdleTimeout != 60*time.Second || server.MaxHeaderBytes != 32*1024 {
+		t.Fatalf("http server configuration = %#v", server)
+	}
+	if server.ReadTimeout != 0 {
+		t.Fatalf("ReadTimeout = %s, want per-route body limits instead", server.ReadTimeout)
+	}
+}
+
+func TestWorkerEndpointsRejectUnknownTrailingAndOversizedJSON(t *testing.T) {
+	server := newPullTestServer(t)
+	endpoints := []struct {
+		path    string
+		handler http.HandlerFunc
+		valid   string
+	}{
+		{path: "/worker/claim", handler: server.handlePullClaim, valid: `{"worker_id":"worker-a"}`},
+		{path: "/worker/renew", handler: server.handlePullRenew, valid: `{"worker_id":"worker-a","task_id":"task-1","lease_id":"lease-1"}`},
+		{path: "/worker/result", handler: server.handlePullResult, valid: `{"worker_id":"worker-a","task_id":"task-1","lease_id":"lease-1","result":{}}`},
+	}
+	for _, endpoint := range endpoints {
+		t.Run(endpoint.path, func(t *testing.T) {
+			for _, body := range []string{
+				strings.TrimSuffix(endpoint.valid, "}") + `,"unknown":true}`,
+				endpoint.valid + ` {}`,
+				`{"padding":"` + strings.Repeat("x", MaxWorkerRequestBytes) + `"}`,
+			} {
+				if got := requestBody(endpoint.handler, endpoint.path, body).Code; got != http.StatusBadRequest {
+					t.Fatalf("body of %d bytes returned HTTP %d, want 400", len(body), got)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkerRequestFieldLimits(t *testing.T) {
+	server := newPullTestServer(t)
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		path    string
+		body    string
+		want    int
+	}{
+		{name: "worker ID", handler: server.handlePullClaim, path: "/worker/claim", body: `{"worker_id":"` + strings.Repeat("w", types.MaxWorkerIDBytes+1) + `"}`, want: http.StatusBadRequest},
+		{name: "worker control", handler: server.handlePullClaim, path: "/worker/claim", body: `{"worker_id":"worker\\nforged"}`, want: http.StatusBadRequest},
+		{name: "task ID", handler: server.handlePullRenew, path: "/worker/renew", body: `{"worker_id":"worker-a","task_id":"` + strings.Repeat("t", types.MaxTaskIDBytes+1) + `","lease_id":"lease-1"}`, want: http.StatusBadRequest},
+		{name: "lease ID", handler: server.handlePullRenew, path: "/worker/renew", body: `{"worker_id":"worker-a","task_id":"task-1","lease_id":"` + strings.Repeat("l", types.MaxLeaseIDBytes+1) + `"}`, want: http.StatusBadRequest},
+		{name: "result output", handler: server.handlePullResult, path: "/worker/result", body: `{"worker_id":"worker-a","task_id":"task-1","lease_id":"lease-1","result":{"output":"` + strings.Repeat("o", types.MaxResultOutputBytes+1) + `"}}`, want: http.StatusRequestEntityTooLarge},
+		{name: "result error", handler: server.handlePullResult, path: "/worker/result", body: `{"worker_id":"worker-a","task_id":"task-1","lease_id":"lease-1","result":{"error":"` + strings.Repeat("e", types.MaxResultErrorBytes+1) + `"}}`, want: http.StatusRequestEntityTooLarge},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := requestBody(test.handler, test.path, test.body).Code; got != test.want {
+				t.Fatalf("HTTP status = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSimpleSubmissionLimitsPreventQueueAmplification(t *testing.T) {
+	server := newPullTestServer(t)
+	inputs := make([]string, workload.MaxTasks)
+	for index := range inputs {
+		inputs[index] = "1ms"
+	}
+	var accepted types.PullSubmitResponse
+	if status := requestJSON(t, server.handlePullSubmit, http.MethodPost, "/pull/submit", types.PullSubmitRequest{TaskType: "diagnostic_sleep", Inputs: inputs}, &accepted); status != http.StatusOK {
+		t.Fatalf("maximum simple submission HTTP status = %d", status)
+	}
+	if len(accepted.TaskIDs) != workload.MaxTasks {
+		t.Fatalf("task IDs = %d, want %d", len(accepted.TaskIDs), workload.MaxTasks)
+	}
+	before := server.pullQueue.Stats().Total
+	for _, request := range []types.PullSubmitRequest{
+		{TaskType: "diagnostic_sleep", Inputs: append(inputs, "1ms")},
+		{TaskType: "diagnostic_sleep", Inputs: []string{strings.Repeat("x", workload.MaxInputBytes+1)}},
+		{TaskType: strings.Repeat("x", workload.MaxTaskTypeBytes+1), Inputs: []string{"1ms"}},
+	} {
+		var response map[string]string
+		if status := requestJSON(t, server.handlePullSubmit, http.MethodPost, "/pull/submit", request, &response); status != http.StatusBadRequest {
+			t.Fatalf("oversized submission HTTP status = %d", status)
+		}
+	}
+	if after := server.pullQueue.Stats().Total; after != before {
+		t.Fatalf("rejected submissions changed queue size from %d to %d", before, after)
+	}
+}
+
+func TestSubmitRejectsUnknownFieldsTrailingJSONAndOversizedBody(t *testing.T) {
+	server := newPullTestServer(t)
+	for _, body := range []string{
+		`{"task_type":"diagnostic_sleep","inputs":["1ms"],"unknown":true}`,
+		`{"task_type":"diagnostic_sleep","inputs":["1ms"]} {}`,
+		`{"task_type":"diagnostic_sleep","inputs":["` + strings.Repeat("x", workload.MaxManifestBytes) + `"]}`,
+	} {
+		if got := requestBody(server.handlePullSubmit, "/pull/submit", body).Code; got != http.StatusBadRequest {
+			t.Fatalf("body of %d bytes returned HTTP %d, want 400", len(body), got)
+		}
+	}
+}
+
 func TestPullProtocolHappyPath(t *testing.T) {
 	server := newPullTestServer(t)
 
@@ -222,7 +334,7 @@ func TestPullProtocolNoTaskAndStaleResult(t *testing.T) {
 		t.Fatalf("empty claim = HTTP %d, %#v", status, empty)
 	}
 
-	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-1", JobID: "job-1", Type: "dummy"}); err != nil {
+	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-1", JobID: "job-1", Type: "diagnostic_sleep"}); err != nil {
 		t.Fatal(err)
 	}
 	assignment, err := server.pullQueue.Claim("worker-a")
@@ -240,7 +352,7 @@ func TestPullProtocolNoTaskAndStaleResult(t *testing.T) {
 
 func TestPullProtocolDuplicateResultIsExplicit(t *testing.T) {
 	server := newPullTestServer(t)
-	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-1", JobID: "job-1", Type: "dummy"}); err != nil {
+	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-1", JobID: "job-1", Type: "diagnostic_sleep"}); err != nil {
 		t.Fatal(err)
 	}
 	assignment, _ := server.pullQueue.Claim("worker-a")
@@ -261,10 +373,10 @@ func TestPullProtocolDuplicateResultIsExplicit(t *testing.T) {
 
 func TestPullStatusUsesQueueAndRecentActivity(t *testing.T) {
 	server := newPullTestServer(t)
-	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-1", JobID: "job-1", Type: "dummy"}); err != nil {
+	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-1", JobID: "job-1", Type: "diagnostic_sleep"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-2", JobID: "job-1", Type: "dummy"}); err != nil {
+	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-2", JobID: "job-1", Type: "diagnostic_sleep"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := server.pullQueue.Claim("worker-b"); err != nil {
@@ -286,10 +398,10 @@ func TestPullStatusUsesQueueAndRecentActivity(t *testing.T) {
 
 func TestMonitorSnapshotUsesQueueWithoutSeparateRegistry(t *testing.T) {
 	server := newPullTestServer(t)
-	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-1", JobID: "job-1", Type: "dummy"}); err != nil {
+	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-1", JobID: "job-1", Type: "diagnostic_sleep"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-2", JobID: "job-1", Type: "dummy"}); err != nil {
+	if err := server.pullQueue.Enqueue(leasequeue.TaskSpec{ID: "task-2", JobID: "job-1", Type: "diagnostic_sleep"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := server.pullQueue.Claim("worker-a"); err != nil {
@@ -297,7 +409,7 @@ func TestMonitorSnapshotUsesQueueWithoutSeparateRegistry(t *testing.T) {
 	}
 	server.recordWorkerActivity("worker-a")
 
-	snapshot := server.MonitorSnapshot([]string{"192.168.0.5:8080"}, "fingerprint")
+	snapshot := server.MonitorSnapshot([]string{"192.0.2.5:8080"}, "fingerprint")
 	if snapshot.Tasks.Queued != 1 || snapshot.Tasks.Running != 1 || snapshot.Tasks.Total != 2 || snapshot.Jobs != 1 {
 		t.Fatalf("monitor snapshot = %#v", snapshot)
 	}

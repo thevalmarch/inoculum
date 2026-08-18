@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/inoculum/internal/version"
+	"github.com/thevalmarch/inoculum/internal/version"
 )
 
 type commandRunner func(args []string, streams Streams) error

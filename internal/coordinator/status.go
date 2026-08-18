@@ -5,8 +5,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/inoculum/internal/leasequeue"
-	"github.com/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/leasequeue"
+	"github.com/thevalmarch/inoculum/internal/types"
 )
 
 const recentWorkerWindow = 30 * time.Second

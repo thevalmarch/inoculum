@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/inoculum/internal/monitor"
-	"github.com/inoculum/internal/presentation/plain"
+	"github.com/thevalmarch/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/presentation/plain"
 )
 
 func TestManifestResultsPreserveOrderAndStructuredFields(t *testing.T) {

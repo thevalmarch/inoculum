@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/monitor"
 )
 
 func TestPlainOutputHasNoTerminalControlSequences(t *testing.T) {
@@ -23,6 +23,26 @@ func TestPlainOutputHasNoTerminalControlSequences(t *testing.T) {
 	for _, expected := range []string{"job=job-1", "OK Job completed", "task-1 state=completed"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("plain output missing %q: %s", expected, output.String())
+		}
+	}
+}
+
+func TestPlainOutputEscapesWorkerControlledText(t *testing.T) {
+	var output bytes.Buffer
+	SubmitSummary(&output, monitor.JobProgress{
+		JobID: "job-1", State: "failed", Total: 1, Failed: 1,
+		Tasks: []monitor.TaskProgress{{
+			TaskID: "task-1\nforged", State: "failed",
+			Error: "failure\r\nforged log line", Attempt: 1,
+		}},
+	}, false, false)
+	got := output.String()
+	if strings.Contains(got, "\x1b") || strings.Contains(got, "failure\r\nforged") || strings.Contains(got, "task-1\nforged") {
+		t.Fatalf("plain output retained injected control characters: %q", got)
+	}
+	for _, expected := range []string{`task-1\nforged`, `failure\r\nforged log line`} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("plain output = %q, missing escaped %q", got, expected)
 		}
 	}
 }
@@ -44,11 +64,11 @@ func TestFailureSummaryIsActionable(t *testing.T) {
 func TestCoordinatorStartupAlwaysShowsTrustFingerprint(t *testing.T) {
 	var output bytes.Buffer
 	CoordinatorStarted(&output, monitor.CoordinatorSnapshot{
-		Addresses:   []string{"192.168.0.5:8080"},
+		Addresses:   []string{"192.0.2.5:8080"},
 		Fingerprint: "AA:BB:CC",
 	}, false)
 	text := output.String()
-	for _, expected := range []string{"coordinator online address=192.168.0.5:8080", "coordinator fingerprint=AA:BB:CC"} {
+	for _, expected := range []string{"coordinator online address=192.0.2.5:8080", "coordinator fingerprint=AA:BB:CC"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("coordinator startup missing %q: %s", expected, text)
 		}

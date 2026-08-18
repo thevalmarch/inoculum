@@ -34,7 +34,7 @@ func (f *Frame) Add(width int, spans ...Span) {
 		if remaining == 0 {
 			break
 		}
-		runes := []rune(span.Text)
+		runes := []rune(SafeText(span.Text))
 		if len(runes) > remaining {
 			runes = runes[:remaining]
 		}

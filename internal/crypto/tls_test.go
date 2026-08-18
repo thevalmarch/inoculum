@@ -181,7 +181,7 @@ func TestLegacyTOFURecordIsNeverImportedAsTrust(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, ".inoculum-worker-known-hosts")
 	legacyFingerprint := strings.Repeat("AA", 32)
-	if err := os.WriteFile(legacy, []byte("192.168.0.5:8080 "+legacyFingerprint+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(legacy, []byte("192.0.2.5:8080 "+legacyFingerprint+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := NewCoordinatorClientConfig(filepath.Join(dir, "trusted-coordinator"), "")

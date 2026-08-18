@@ -52,8 +52,9 @@ type PullClaimRequest struct {
 }
 
 type PullClaimResponse struct {
-	Status PullStatus `json:"status"`
-	Task   *PullTask  `json:"task,omitempty"`
+	Status  PullStatus `json:"status"`
+	Task    *PullTask  `json:"task,omitempty"`
+	Message string     `json:"message,omitempty"`
 }
 
 type PullRenewRequest struct {

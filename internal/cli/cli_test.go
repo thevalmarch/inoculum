@@ -11,7 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inoculum/internal/version"
+	"github.com/thevalmarch/inoculum/internal/version"
+	"github.com/thevalmarch/inoculum/internal/workload"
 )
 
 type capturedStreams struct {
@@ -170,7 +171,7 @@ func TestCommandHelpIsPlainAndCommandSpecific(t *testing.T) {
 		flags   []string
 	}{
 		{command: "coordinator", flags: []string{"--port", "--lease-duration", "--max-attempts", "--token", "--audit-log", "--log-file", "--plain", "--verbose", "--no-color", "--ascii"}},
-		{command: "worker", flags: []string{"--coordinator", "--id", "--concurrency", "--allowed-paths", "--token", "--coordinator-fingerprint", "--log-file", "--plain", "--verbose", "--no-color", "--ascii"}},
+		{command: "worker", flags: []string{"--coordinator", "--id", "--concurrency", "--token", "--coordinator-fingerprint", "--log-file", "--plain", "--verbose", "--no-color", "--ascii"}},
 		{command: "submit", flags: []string{"--coordinator", "--token", "--coordinator-fingerprint", "--type", "--input", "--tasks", "--manifest", "--output", "--timeout", "--log-file", "--plain", "--verbose", "--no-color", "--ascii"}},
 	}
 	for _, test := range tests {
@@ -206,7 +207,7 @@ func TestCommandDefaultsMatchLegacyEntrypoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if worker.coordinator != "" || worker.workerID != "" || worker.concurrency != 1 || worker.allowed != "." || worker.presentation.logFile != "inoculum-worker.log" {
+	if worker.coordinator != "" || worker.workerID != "" || worker.concurrency != 1 || worker.presentation.logFile != "inoculum-worker.log" {
 		t.Fatalf("worker defaults = %#v", worker)
 	}
 
@@ -296,22 +297,22 @@ func TestAllRetainedFlagsParse(t *testing.T) {
 	}
 
 	worker, err := parseWorkerOptions([]string{
-		"--coordinator", "host:9000", "--id", "worker-a", "--concurrency", "4", "--allowed-paths", "a,b", "--token", "secret", "--coordinator-fingerprint", "AA:BB", "--log-file", "worker.log", "--plain", "--verbose", "--no-color", "--ascii",
+		"--coordinator", "host:9000", "--id", "worker-a", "--concurrency", "4", "--token", "secret", "--coordinator-fingerprint", "AA:BB", "--log-file", "worker.log", "--plain", "--verbose", "--no-color", "--ascii",
 	}, captured.streams)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if worker.coordinator != "host:9000" || worker.workerID != "worker-a" || worker.concurrency != 4 || worker.allowed != "a,b" || worker.token != "secret" || worker.fingerprint != "AA:BB" || !worker.presentation.plain || !worker.presentation.verbose || !worker.presentation.noColor || !worker.presentation.ascii || worker.presentation.logFile != "worker.log" {
+	if worker.coordinator != "host:9000" || worker.workerID != "worker-a" || worker.concurrency != 4 || worker.token != "secret" || worker.fingerprint != "AA:BB" || !worker.presentation.plain || !worker.presentation.verbose || !worker.presentation.noColor || !worker.presentation.ascii || worker.presentation.logFile != "worker.log" {
 		t.Fatalf("worker options = %#v", worker)
 	}
 
 	submit, err := parseSubmitOptions([]string{
-		"--coordinator", "host:9000", "--token", "secret", "--coordinator-fingerprint", "AA:BB", "--type", "file_analyze", "--input", "input", "--tasks", "4", "--timeout", "2m", "--log-file", "submit.log", "--plain", "--verbose", "--no-color", "--ascii",
+		"--coordinator", "host:9000", "--token", "secret", "--coordinator-fingerprint", "AA:BB", "--type", "diagnostic_sleep", "--input", "1s", "--tasks", "4", "--timeout", "2m", "--log-file", "submit.log", "--plain", "--verbose", "--no-color", "--ascii",
 	}, captured.streams)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if submit.coordinator != "host:9000" || submit.token != "secret" || submit.fingerprint != "AA:BB" || submit.taskType != "file_analyze" || submit.input != "input" || submit.taskCount != 4 || submit.timeout != 2*time.Minute || !submit.presentation.plain || !submit.presentation.verbose || !submit.presentation.noColor || !submit.presentation.ascii || submit.presentation.logFile != "submit.log" {
+	if submit.coordinator != "host:9000" || submit.token != "secret" || submit.fingerprint != "AA:BB" || submit.taskType != "diagnostic_sleep" || submit.input != "1s" || submit.taskCount != 4 || submit.timeout != 2*time.Minute || !submit.presentation.plain || !submit.presentation.verbose || !submit.presentation.noColor || !submit.presentation.ascii || submit.presentation.logFile != "submit.log" {
 		t.Fatalf("submit options = %#v", submit)
 	}
 }
@@ -324,6 +325,7 @@ func TestRemovedAndUnknownFlagsFailAsUsage(t *testing.T) {
 	}{
 		{name: "coordinator discovery", command: "coordinator", args: []string{"--discovery=false"}},
 		{name: "worker mode", command: "worker", args: []string{"--mode", "pull"}},
+		{name: "worker allowed paths", command: "worker", args: []string{"--allowed-paths", "."}},
 		{name: "unknown", command: "submit", args: []string{"--wat"}},
 		{name: "positional", command: "submit", args: []string{"extra"}},
 		{name: "invalid integer", command: "worker", args: []string{"--concurrency", "many"}},
@@ -353,7 +355,11 @@ func TestInvalidSemanticFlagValuesExitTwo(t *testing.T) {
 		{"coordinator", "--max-attempts", "0"},
 		{"coordinator", "--max-attempts", "-1"},
 		{"worker", "--coordinator", "localhost:8080", "--concurrency", "0"},
+		{"worker", "--coordinator", "localhost:8080", "--id", "bad id"},
 		{"submit", "--tasks", "0"},
+		{"submit", "--tasks", "1001"},
+		{"submit", "--input", strings.Repeat("x", workload.MaxInputBytes+1)},
+		{"submit", "--type", "bad\ntype"},
 	} {
 		captured := newCapturedStreams(t)
 		if code := Main(args, captured.streams); code != 2 {

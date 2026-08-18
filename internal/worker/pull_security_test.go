@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	inoculumcrypto "github.com/inoculum/internal/crypto"
-	"github.com/inoculum/internal/types"
+	inoculumcrypto "github.com/thevalmarch/inoculum/internal/crypto"
+	"github.com/thevalmarch/inoculum/internal/types"
 )
 
 func TestPullWorkerUsesBearerTokenAndSharedPersistedTrust(t *testing.T) {

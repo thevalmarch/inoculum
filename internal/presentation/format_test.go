@@ -1,6 +1,7 @@
 package presentation
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,5 +31,19 @@ func TestCompactDurationUsesCalmWholeSeconds(t *testing.T) {
 				t.Fatalf("CompactDuration(%s) = %q, want %q", test.duration, got, test.want)
 			}
 		})
+	}
+}
+
+func TestSafeTextEscapesTerminalAndLineControlCharacters(t *testing.T) {
+	got := SafeText("worker\x1b[31m\nforged\tline")
+	for _, forbidden := range []string{"\x1b", "\n", "\t"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("SafeText() retained control character %q in %q", forbidden, got)
+		}
+	}
+	for _, expected := range []string{`\x1b`, `\n`, `\t`} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("SafeText() = %q, missing %q", got, expected)
+		}
 	}
 }

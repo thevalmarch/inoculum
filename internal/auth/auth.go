@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/inoculum/internal/audit"
+	"github.com/thevalmarch/inoculum/internal/audit"
 )
 
 // WithBearerAuth requires the standard Authorization: Bearer header. TLS
@@ -15,7 +15,11 @@ import (
 // domain-level handling for stale or duplicate results.
 func WithBearerAuth(expectedToken string, next http.HandlerFunc) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		presentedToken, ok := bearerToken(request.Header.Get("Authorization"))
+		authorizationHeaders := request.Header.Values("Authorization")
+		presentedToken, ok := "", false
+		if len(authorizationHeaders) == 1 {
+			presentedToken, ok = bearerToken(authorizationHeaders[0])
+		}
 		if !ok || !tokensEqual(presentedToken, expectedToken) {
 			log.Printf("[auth] Authentication failed from %s for %s", request.RemoteAddr, request.URL.Path)
 			audit.LogEvent("auth_failure", request.RemoteAddr, "401", "Authentication failed", map[string]any{"path": request.URL.Path})

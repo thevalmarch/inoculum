@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/inoculum/internal/monitor"
-	"github.com/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/types"
 )
 
 type manifestResults struct {

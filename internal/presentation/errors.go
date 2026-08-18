@@ -9,7 +9,7 @@ func FriendlyError(err error, verbose bool) string {
 	if err == nil {
 		return ""
 	}
-	message := err.Error()
+	message := SafeText(err.Error())
 	lower := strings.ToLower(message)
 	var summary, advice string
 	switch {

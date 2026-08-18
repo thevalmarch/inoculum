@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/monitor"
 )
 
 func TestCoordinatorFrameLayoutsStayWithinTerminal(t *testing.T) {
@@ -13,7 +13,7 @@ func TestCoordinatorFrameLayoutsStayWithinTerminal(t *testing.T) {
 	snapshot := monitor.CoordinatorSnapshot{
 		ObservedAt:  now,
 		Online:      true,
-		Addresses:   []string{"192.168.0.5:8080"},
+		Addresses:   []string{"192.0.2.5:8080"},
 		Fingerprint: "55:17:37:57:20:fa:46:ab:b6:89:0a:be:13:86:8f:39",
 		Uptime:      18 * time.Minute,
 		Tasks:       monitor.TaskCounts{Queued: 2, Running: 2, Completed: 8, Total: 12},
@@ -59,7 +59,7 @@ func TestWorkerReconnectAndSecurityStates(t *testing.T) {
 		{monitor.ConnectionIdentity, "stored trust was not bypassed"},
 	} {
 		frame := WorkerFrame(monitor.WorkerSnapshot{
-			ObservedAt: now, WorkerID: "linux-worker", Coordinator: "192.168.0.5:8080",
+			ObservedAt: now, WorkerID: "linux-worker", Coordinator: "192.0.2.5:8080",
 			Connection: test.state, UnavailableSince: now.Add(-12 * time.Second), RetryAt: now.Add(4 * time.Second), RetryAttempt: 3, Concurrency: 4,
 		}, 80, 24, Capabilities{Unicode: true})
 		text := strings.Join(frame.PlainLines(), "\n")

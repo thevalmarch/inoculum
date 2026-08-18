@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/inoculum/internal/presentation"
+	"github.com/thevalmarch/inoculum/internal/presentation"
 )
 
 // Streams are the process streams used by a selected command. They remain

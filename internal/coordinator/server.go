@@ -4,19 +4,25 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/inoculum/internal/auth"
-	"github.com/inoculum/internal/leasequeue"
-	"github.com/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/auth"
+	"github.com/thevalmarch/inoculum/internal/leasequeue"
+	"github.com/thevalmarch/inoculum/internal/monitor"
 )
 
 const (
-	DefaultLeaseDuration = 6 * time.Second
-	DefaultMaxAttempts   = 3
+	DefaultLeaseDuration  = 6 * time.Second
+	DefaultMaxAttempts    = 3
+	MaxWorkerRequestBytes = 128 * 1024
+	readHeaderTimeout     = 5 * time.Second
+	writeTimeout          = 30 * time.Second
+	idleTimeout           = 60 * time.Second
+	maxHeaderBytes        = 32 * 1024
 )
 
 // Config contains coordinator-owned runtime configuration. Lease and retry
@@ -92,7 +98,18 @@ func (s *Server) Start() error {
 	log.Printf("[coordinator] Lease policy: duration=%s max_attempts=%d", s.leaseDuration, s.maxAttempts)
 	log.Printf("[coordinator] Worker API: POST /worker/claim, /worker/renew, /worker/result")
 	log.Printf("[coordinator] Client API: POST /pull/submit, GET /pull/job?id=..., GET /status")
-	return http.Serve(listener, s.routes())
+	server := s.httpServer()
+	return server.Serve(listener)
+}
+
+func (s *Server) httpServer() *http.Server {
+	return &http.Server{
+		Handler:           s.routes(),
+		ReadHeaderTimeout: readHeaderTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+	}
 }
 
 func (s *Server) recordWorkerActivity(workerID string) {
@@ -119,4 +136,21 @@ func writeJSON(w http.ResponseWriter, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		log.Printf("[coordinator] Error writing response: %v", err)
 	}
+}
+
+func decodeJSONRequest(w http.ResponseWriter, r *http.Request, value any, maxBytes int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }

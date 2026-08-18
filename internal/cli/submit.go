@@ -15,14 +15,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/inoculum/internal/appconfig"
-	"github.com/inoculum/internal/crypto"
-	"github.com/inoculum/internal/monitor"
-	"github.com/inoculum/internal/presentation"
-	"github.com/inoculum/internal/presentation/plain"
-	"github.com/inoculum/internal/presentation/tui"
-	"github.com/inoculum/internal/types"
-	"github.com/inoculum/internal/workload"
+	"github.com/thevalmarch/inoculum/internal/appconfig"
+	"github.com/thevalmarch/inoculum/internal/crypto"
+	"github.com/thevalmarch/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/presentation"
+	"github.com/thevalmarch/inoculum/internal/presentation/plain"
+	"github.com/thevalmarch/inoculum/internal/presentation/tui"
+	"github.com/thevalmarch/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/workload"
 )
 
 const manifestPlainProgressInterval = 2 * time.Second
@@ -88,6 +88,12 @@ func RunSubmit(args []string, streams Streams) error {
 		}
 	} else if options.taskCount <= 0 {
 		return usageErrorf("--tasks must be positive")
+	} else if options.taskCount > workload.MaxTasks {
+		return usageErrorf("--tasks must not exceed %d", workload.MaxTasks)
+	} else if err := workload.ValidateTaskType(options.taskType); err != nil {
+		return usageErrorf("invalid --type: %v", err)
+	} else if len(options.input) > workload.MaxInputBytes {
+		return usageErrorf("--input exceeds the %d-byte limit", workload.MaxInputBytes)
 	}
 	if options.outputPath != "" {
 		if err := validateResultOutputPath(options.outputPath); err != nil {

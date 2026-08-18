@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/types"
 )
 
 // JobFromResponse converts the wire representation into presentation-neutral

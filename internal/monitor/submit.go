@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/types"
 )
 
 type SubmitTracker struct {

@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/inoculum/internal/appconfig"
-	"github.com/inoculum/internal/crypto"
-	"github.com/inoculum/internal/monitor"
-	"github.com/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/appconfig"
+	"github.com/thevalmarch/inoculum/internal/crypto"
+	"github.com/thevalmarch/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/types"
 )
 
 const (
@@ -29,7 +29,6 @@ type PullConfig struct {
 	Fingerprint     string
 	TrustFile       string
 	Concurrency     int
-	AllowedPaths    []string
 }
 
 // PullWorker requests work only when it has local execution capacity. It has
@@ -52,8 +51,8 @@ func NewPullWorker(config PullConfig) (*PullWorker, error) {
 	if config.CoordinatorAddr == "" {
 		return nil, fmt.Errorf("coordinator address is required in pull mode")
 	}
-	if config.WorkerID == "" {
-		return nil, fmt.Errorf("worker ID is required")
+	if err := types.ValidateWorkerID(config.WorkerID); err != nil {
+		return nil, err
 	}
 	if config.Token == "" {
 		return nil, fmt.Errorf("token is required")
@@ -80,7 +79,7 @@ func NewPullWorker(config PullConfig) (*PullWorker, error) {
 
 	return &PullWorker{
 		config:   config,
-		executor: NewExecutor(config.AllowedPaths),
+		executor: NewExecutor(),
 		monitor:  monitor.NewWorkerTracker(config.WorkerID, config.CoordinatorAddr, config.Concurrency),
 		client: &http.Client{
 			Timeout:   30 * time.Second,

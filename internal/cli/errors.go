@@ -5,7 +5,7 @@ import (
 	"flag"
 	"fmt"
 
-	"github.com/inoculum/internal/presentation"
+	"github.com/thevalmarch/inoculum/internal/presentation"
 )
 
 type usageError struct {

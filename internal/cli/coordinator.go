@@ -9,13 +9,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/inoculum/internal/appconfig"
-	"github.com/inoculum/internal/audit"
-	"github.com/inoculum/internal/coordinator"
-	"github.com/inoculum/internal/crypto"
-	"github.com/inoculum/internal/presentation"
-	"github.com/inoculum/internal/presentation/plain"
-	"github.com/inoculum/internal/presentation/tui"
+	"github.com/thevalmarch/inoculum/internal/appconfig"
+	"github.com/thevalmarch/inoculum/internal/audit"
+	"github.com/thevalmarch/inoculum/internal/coordinator"
+	"github.com/thevalmarch/inoculum/internal/crypto"
+	"github.com/thevalmarch/inoculum/internal/presentation"
+	"github.com/thevalmarch/inoculum/internal/presentation/plain"
+	"github.com/thevalmarch/inoculum/internal/presentation/tui"
 )
 
 type coordinatorOptions struct {

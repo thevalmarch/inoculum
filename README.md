@@ -41,7 +41,7 @@ Copy the fingerprint it prints, then connect a worker:
 ```bash
 export INOCULUM_TOKEN='a-long-random-secret'
 ./inoculum worker \
-  --coordinator 192.168.0.5:8080 \
+  --coordinator '<coordinator-lan-ip>:8080' \
   --id mac-worker \
   --coordinator-fingerprint '<fingerprint>'
 ```
@@ -51,7 +51,7 @@ Submit four duplicate-safe diagnostic tasks:
 ```bash
 export INOCULUM_TOKEN='a-long-random-secret'
 ./inoculum submit \
-  --coordinator 192.168.0.5:8080 \
+  --coordinator '<coordinator-lan-ip>:8080' \
   --type diagnostic_sleep \
   --input 2s \
   --tasks 4
@@ -104,8 +104,9 @@ Release `v1.0.0` uses one archive per platform:
 - `inoculum_v1.0.0_linux_amd64.tar.gz`
 - `inoculum_v1.0.0_windows_amd64.zip`
 
-Each archive contains the platform binary and `LICENSE`. Download the matching
-archive and `SHA256SUMS` from the release after it is published.
+Each archive contains the platform binary, `LICENSE`, and
+`THIRD_PARTY_LICENSES`. Download the matching archive and `SHA256SUMS` from the
+release after it is published.
 
 On macOS, verify, extract, and run the arm64 archive:
 
@@ -142,6 +143,8 @@ No release binaries are currently signed.
 
 ### Build from source
 
+Release-safe source builds require Go 1.26.6 or later.
+
 Native development build:
 
 ```bash
@@ -153,7 +156,7 @@ An ordinary source build reports `inoculum dev`. Release builds inject the
 version with this linker assignment:
 
 ```text
--X github.com/inoculum/internal/version.Value=v1.0.0
+-X github.com/thevalmarch/inoculum/internal/version.Value=v1.0.0
 ```
 
 No commit SHA, build date, local path, or machine identity is included in
@@ -178,7 +181,9 @@ distribution method. Inoculum does not transfer its own binaries.
 
 ## Quick start on a LAN
 
-Choose the coordinator machine's LAN address. The examples use `192.168.0.5`.
+Choose the coordinator machine's LAN address. The examples use the placeholder
+`<coordinator-lan-ip>`; replace it with the coordinator machine's actual LAN
+address.
 
 ### 1. Start the coordinator
 
@@ -198,7 +203,7 @@ coordinator:
 ```bash
 export INOCULUM_TOKEN='a-long-random-secret'
 ./inoculum worker \
-  --coordinator 192.168.0.5:8080 \
+  --coordinator '<coordinator-lan-ip>:8080' \
   --id linux-worker \
   --coordinator-fingerprint '<fingerprint>'
 ```
@@ -209,7 +214,7 @@ Subsequent worker starts on that machine do not need the fingerprint:
 ```bash
 export INOCULUM_TOKEN='a-long-random-secret'
 ./inoculum worker \
-  --coordinator 192.168.0.5:8080 \
+  --coordinator '<coordinator-lan-ip>:8080' \
   --id linux-worker
 ```
 
@@ -223,7 +228,7 @@ Once trust is established on the submitting machine:
 ```bash
 export INOCULUM_TOKEN='a-long-random-secret'
 ./inoculum submit \
-  --coordinator 192.168.0.5:8080 \
+  --coordinator '<coordinator-lan-ip>:8080' \
   --type diagnostic_sleep \
   --input 2s \
   --tasks 4
@@ -255,7 +260,7 @@ Submit it and save the detailed result:
 ```bash
 export INOCULUM_TOKEN='a-long-random-secret'
 ./inoculum submit \
-  --coordinator 192.168.0.5:8080 \
+  --coordinator '<coordinator-lan-ip>:8080' \
   --manifest probes.json \
   --output probe-results.json \
   --timeout 2m
@@ -312,7 +317,7 @@ diagnostics and lease/failover testing:
 
 ```bash
 ./inoculum submit \
-  --coordinator 192.168.0.5:8080 \
+  --coordinator '<coordinator-lan-ip>:8080' \
   --type diagnostic_sleep \
   --input 2s \
   --tasks 4
@@ -388,12 +393,6 @@ non-idempotent side effects or otherwise tolerate duplicate execution.
 |---|---|---|
 | `http_probe` | Bounded HTTP/TLS endpoint inspection; primary manifest workload | One absolute HTTP or HTTPS URL |
 | `diagnostic_sleep` | Duplicate-safe lease, retry, and distribution testing | A duration up to 5 minutes, such as `2s` |
-| `file_analyze` | Counts lines, words, and bytes in a worker-local file | A local file path allowed by the worker's `--allowed-paths` |
-
-`file_analyze` does not transfer files. The referenced path must exist and be
-allowed on whichever worker claims the task. It is therefore most appropriate
-for deliberately pre-staged or consistently mounted data.
-
 Inoculum does not execute arbitrary shell commands or external programs.
 
 ## Platform support

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/inoculum/internal/presentation"
+	"github.com/thevalmarch/inoculum/internal/presentation"
 )
 
 func TestDrawFrameOnSimulationScreenWithoutColor(t *testing.T) {

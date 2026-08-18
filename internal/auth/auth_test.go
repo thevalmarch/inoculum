@@ -40,6 +40,20 @@ func TestBearerAuthentication(t *testing.T) {
 	}
 }
 
+func TestDuplicateAuthorizationHeadersAreRejected(t *testing.T) {
+	handler := WithBearerAuth("correct-secret", func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	})
+	request := httptest.NewRequest(http.MethodPost, "/worker/claim", nil)
+	request.Header.Add("Authorization", "Bearer correct-secret")
+	request.Header.Add("Authorization", "Bearer correct-secret")
+	recorder := httptest.NewRecorder()
+	handler(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestAuthenticationDoesNotRequireNonceTimestampOrClock(t *testing.T) {
 	handler := WithBearerAuth("secret", func(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusNoContent)

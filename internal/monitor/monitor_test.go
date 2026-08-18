@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/types"
 )
 
 func TestRecorderIsBoundedAndReturnsCopies(t *testing.T) {

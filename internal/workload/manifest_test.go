@@ -82,6 +82,35 @@ func TestManifestTaskLimit(t *testing.T) {
 	}
 }
 
+func TestSimpleSubmissionLimits(t *testing.T) {
+	inputs := make([]string, MaxTasks)
+	for index := range inputs {
+		inputs[index] = "input"
+	}
+	if err := ValidateSimpleInputs(inputs); err != nil {
+		t.Fatalf("maximum-sized simple submission rejected: %v", err)
+	}
+	if err := ValidateSimpleInputs(append(inputs, "one-too-many")); err == nil {
+		t.Fatal("oversized simple task count accepted")
+	}
+	if err := ValidateSimpleInputs([]string{strings.Repeat("x", MaxInputBytes+1)}); err == nil {
+		t.Fatal("oversized simple input accepted")
+	}
+}
+
+func TestTaskTypeValidation(t *testing.T) {
+	for _, valid := range []string{"http_probe", "diagnostic_sleep"} {
+		if err := ValidateTaskType(valid); err != nil {
+			t.Fatalf("ValidateTaskType(%q): %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", "HTTP_PROBE", "bad\ntype", strings.Repeat("x", MaxTaskTypeBytes+1)} {
+		if err := ValidateTaskType(invalid); err == nil {
+			t.Fatalf("ValidateTaskType(%q) succeeded", invalid)
+		}
+	}
+}
+
 func TestLoadManifestRejectsUnknownFieldsAndInvalidJSON(t *testing.T) {
 	directory := t.TempDir()
 	tests := []struct {

@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/inoculum/internal/leasequeue"
-	"github.com/inoculum/internal/monitor"
-	"github.com/inoculum/internal/types"
-	"github.com/inoculum/internal/workload"
+	"github.com/thevalmarch/inoculum/internal/leasequeue"
+	"github.com/thevalmarch/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/types"
+	"github.com/thevalmarch/inoculum/internal/workload"
 )
 
 func (s *Server) handlePullClaim(w http.ResponseWriter, r *http.Request) {
@@ -21,8 +21,12 @@ func (s *Server) handlePullClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req types.PullClaimRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.WorkerID == "" {
-		writeJSONStatus(w, http.StatusBadRequest, types.PullClaimResponse{Status: types.PullRejected})
+	if err := decodeJSONRequest(w, r, &req, MaxWorkerRequestBytes); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, types.PullClaimResponse{Status: types.PullRejected, Message: "invalid request"})
+		return
+	}
+	if err := types.ValidateWorkerID(req.WorkerID); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, types.PullClaimResponse{Status: types.PullRejected, Message: err.Error()})
 		return
 	}
 	s.recordWorkerActivity(req.WorkerID)
@@ -65,8 +69,12 @@ func (s *Server) handlePullRenew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req types.PullRenewRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequest(w, r, &req, MaxWorkerRequestBytes); err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, types.PullRenewResponse{Status: types.PullRejected, Message: "invalid request"})
+		return
+	}
+	if err := validateLeaseRequest(req.WorkerID, req.TaskID, req.LeaseID); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, types.PullRenewResponse{Status: types.PullRejected, Message: err.Error()})
 		return
 	}
 	s.recordWorkerActivity(req.WorkerID)
@@ -87,8 +95,20 @@ func (s *Server) handlePullResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req types.PullResultRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequest(w, r, &req, MaxWorkerRequestBytes); err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, types.PullResultResponse{Status: types.PullRejected, Message: "invalid request"})
+		return
+	}
+	if err := validateLeaseRequest(req.WorkerID, req.TaskID, req.LeaseID); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, types.PullResultResponse{Status: types.PullRejected, Message: err.Error()})
+		return
+	}
+	if req.Result.TaskID != "" && req.Result.TaskID != req.TaskID {
+		writeJSONStatus(w, http.StatusBadRequest, types.PullResultResponse{Status: types.PullRejected, Message: "result task ID does not match request task ID"})
+		return
+	}
+	if err := types.ValidateResult(req.Result); err != nil {
+		writeJSONStatus(w, http.StatusRequestEntityTooLarge, types.PullResultResponse{Status: types.PullRejected, Message: err.Error()})
 		return
 	}
 	s.recordWorkerActivity(req.WorkerID)
@@ -134,12 +154,13 @@ func (s *Server) handlePullSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, workload.MaxManifestBytes)
 	var req types.PullSubmitRequest
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&req); err != nil || req.TaskType == "" {
+	if err := decodeJSONRequest(w, r, &req, workload.MaxManifestBytes); err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "task_type and valid task inputs are required"})
+		return
+	}
+	if err := workload.ValidateTaskType(req.TaskType); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if len(req.Inputs) > 0 && len(req.Tasks) > 0 {
@@ -161,8 +182,8 @@ func (s *Server) handlePullSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		if len(req.Inputs) == 0 {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "at least one input is required"})
+		if err := workload.ValidateSimpleInputs(req.Inputs); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		for _, input := range req.Inputs {
@@ -184,6 +205,16 @@ func (s *Server) handlePullSubmit(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[pull] Job %s queued with %d tasks", jobID, len(taskIDs))
 	s.recordEvent(monitor.SeverityInfo, "job_queued", "Job queued", map[string]string{"job_id": jobID, "tasks": fmt.Sprint(len(taskIDs))})
 	writeJSON(w, types.PullSubmitResponse{JobID: jobID, TaskIDs: taskIDs})
+}
+
+func validateLeaseRequest(workerID, taskID, leaseID string) error {
+	if err := types.ValidateWorkerID(workerID); err != nil {
+		return err
+	}
+	if err := types.ValidateTaskID(taskID); err != nil {
+		return err
+	}
+	return types.ValidateLeaseID(leaseID)
 }
 
 func (s *Server) handlePullJob(w http.ResponseWriter, r *http.Request) {

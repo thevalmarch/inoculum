@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/inoculum/internal/monitor"
+	"github.com/thevalmarch/inoculum/internal/monitor"
 )
 
 func CoordinatorFrame(snapshot monitor.CoordinatorSnapshot, width, height int, caps Capabilities) Frame {

@@ -2,8 +2,10 @@ package presentation
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 func CompactDuration(duration time.Duration) string {
@@ -26,6 +28,22 @@ func CompactDuration(duration time.Duration) string {
 		return fmt.Sprintf("%dm%ds", minutes, seconds)
 	}
 	return duration.Round(time.Minute).String()
+}
+
+// SafeText makes untrusted runtime text inert when rendered in terminals or
+// line-oriented logs. It preserves ordinary Unicode while visibly escaping
+// control characters such as newlines and terminal escape bytes.
+func SafeText(text string) string {
+	var builder strings.Builder
+	for _, character := range text {
+		if !unicode.IsControl(character) {
+			builder.WriteRune(character)
+			continue
+		}
+		quoted := strconv.QuoteRune(character)
+		builder.WriteString(quoted[1 : len(quoted)-1])
+	}
+	return builder.String()
 }
 
 func ShortID(id string, width int, unicode bool) string {
