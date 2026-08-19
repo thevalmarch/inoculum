@@ -1,13 +1,8 @@
-# Terminal screenshots
+# Terminal media
 
-This directory is reserved for real, manually captured terminal screenshots.
-No screenshot assets are included yet.
+`inoculum-demo.gif` is the real terminal demo used by the repository README.
+It shows the coordinator TUI processing a batch across connected workers.
 
-Recommended filenames:
-
-- `coordinator-tui.png`
-- `worker-tui.png`
-- `submit-tui.png`
-
-README image references should be added only after the corresponding real files
-exist.
+Future screenshots should be real, manually captured assets. Suitable names are
+`coordinator-tui.png`, `worker-tui.png`, and `submit-tui.png`; add README image
+references only after those files exist.
